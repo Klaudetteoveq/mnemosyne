@@ -52,3 +52,38 @@ htmlcov/
 MNEMOSYNE_CONTEXT_POLLUTION_PLAN.md
 extension/package-lock.json
 .vscode/settings.json
+
+# Harden against accidentally committing secrets - Harder than John Holmes on the set of Boogie Nights
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.sqlite
+*.db
+*.bak
+secrets.json
+credentials.json
+.envrc
+
+# Secret / local config variants
+*.secret
+*.secrets
+*.local
+local.settings.json
+
+# Dumps / exports
+*.dump
+*.sql
+*.tar.gz
+*.zip
+
+# More cert/key formats
+*.der
+*.jks
+*.keystore
+
+# Terraform / cloud leftovers
+*.tfvars
+terraform.tfstate
+terraform.tfstate.*
