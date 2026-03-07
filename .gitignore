@@ -42,6 +42,9 @@ Social Media/linkedin_mnemosyne_post.md
 # Docker
 docker-compose.override.yml
 
+# Neo4j runtime data (created by Docker volumes)
+server/data/
+
 # Backups (stored locally, not in repo)
 backups/
 

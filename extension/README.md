@@ -25,5 +25,5 @@ Auto-bootstrap memory context on VS Code startup and auto-commit sessions on clo
 cd extension
 npm install
 npm run package
-code --install-extension mnemosyne-vscode-1.0.1.vsix
+code --install-extension mnemosyne-vscode-2.0.0.vsix
 ```

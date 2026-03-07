@@ -92,7 +92,7 @@ Auto-bootstraps memory on startup and auto-commits on close:
 
 ```bash
 cd extension && npm install && npm run package
-code --install-extension mnemosyne-vscode-1.0.1.vsix
+code --install-extension mnemosyne-vscode-2.0.0.vsix
 ```
 
 Then set `mnemosyne.serverUrl` to `http://localhost:8010/mcp` in VS Code Settings.
@@ -116,6 +116,10 @@ cp .env.example server/.env
 | `NEO4J_PASSWORD` | `mnemosyne` | Neo4j password |
 | `NEO4J_USER` | `neo4j` | Neo4j username |
 | `MNEMOSYNE_PORT` | `8010` | MCP server port |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama server URL (for RAG features) |
+| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Embedding model |
+| `OLLAMA_CHAT_MODEL` | `qwen2.5-coder:32b` | Generation model (for `mnemosyne_ask`) |
+| `MNEMOSYNE_EMBED_ON_WRITE` | `0` | Auto-embed on write (`1` to enable, requires Ollama) |
 
 To test that memories are stored, open localhost:7474 (or whatever you set up if you changed it), log in, and run the following in your browser. If you have created one or more memories, it should show up.
 ```
@@ -146,13 +150,16 @@ RETURN m, r, t;
 | `mnemosyne_bootstrap` | Returns pinned + recent memory items for session context. Supports `mode` (thin/hybrid/full), `max_tokens` budget, and `workspace_hint` scoping |
 | `mnemosyne_write` | Stores a memory item (deduplicates by kind + title). Accepts optional `content_compact`, `importance`, `workspace_hint`, and `source` |
 | `mnemosyne_read` | Retrieves a single memory item by ID with full or compact content |
-| `mnemosyne_search` | Full-text search across all memories. Returns compact snippets by default with `has_full` indicator |
+| `mnemosyne_search` | Search memories via keyword, semantic, or hybrid retrieval. Supports `method` (keyword/semantic/hybrid), `prefer` (compact/full), and `snippet_chars` |
 | `mnemosyne_commit_session` | Commits end-of-session summary with decisions and next steps |
 | `mnemosyne_last_session` | Returns the most recent sessions for a workspace |
+| `mnemosyne_ingest` | Chunk, embed, and store documents for RAG retrieval. Requires Ollama |
+| `mnemosyne_ask` | RAG question answering: retrieve context, generate answer with citations. Requires Ollama |
+| `mnemosyne_backfill_embeddings` | Vectorize existing memories for semantic search. Requires Ollama |
 
 ## Context Pollution Prevention
 
-As your memory store grows, naively loading everything into the AI's context window wastes tokens on low-signal content — stale notes, verbose logs, irrelevant decisions. Mnemosyne v1.0.1 addresses this with a three-lever system:
+As your memory store grows, naively loading everything into the AI's context window wastes tokens on low-signal content — stale notes, verbose logs, irrelevant decisions. Mnemosyne v2.0 addresses this with a three-lever system:
 
 **Lever A — Write-time hygiene.** Each memory kind has a clear contract: decisions capture one decision with rationale, patterns describe a reusable approach, commands store a verified snippet. When content is long, the server auto-generates a compact summary (first ~200 characters at a sentence boundary) so bootstrap never needs to load the full text.
 
@@ -201,7 +208,7 @@ mnemosyne/
 │   ├── Dockerfile          # MCP server container image
 │   ├── mnemosyne_proxy.py  # Stdio-to-HTTP MCP proxy
 │   ├── app/
-│   │   ├── server.py       # Main HTTP MCP server (6 tools)
+│   │   ├── server.py       # Main HTTP MCP server (9 tools)
 │   │   ├── requirements.txt
 │   │   └── storage/
 │   │       ├── base.py           # Abstract storage interface
@@ -220,6 +227,7 @@ mnemosyne/
 │   └── backup.ps1          # Neo4j backup script
 └── docs/
     ├── INSTALL.md          # Full installation guide
+    ├── UPGRADING.md        # v1 → v2 migration guide
     ├── shared-storage.md   # Multi-tenant shared spaces design
     └── visual-identity.md  # Brand guidelines and image prompts
 ```
@@ -227,3 +235,7 @@ mnemosyne/
 ## License
 
 MIT
+
+## Upgrading
+
+Upgrading from v1 to v2? See [docs/UPGRADING.md](docs/UPGRADING.md). All v1 features work without changes — RAG is additive and optional.
