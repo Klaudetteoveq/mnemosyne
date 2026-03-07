@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_CHAT_MODEL = os.environ.get("OLLAMA_CHAT_MODEL", "qwen2.5-coder:32b")
-GENERATE_TIMEOUT = 120.0
+GENERATE_TIMEOUT = 300.0
 
 SYSTEM_PROMPT = """You are Mnemosyne, a knowledge assistant. Answer questions based ONLY on the provided context.
 
