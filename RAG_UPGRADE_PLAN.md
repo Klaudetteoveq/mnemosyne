@@ -8,8 +8,8 @@ clients and tools keep working with zero breaking changes.
 
 ## Infrastructure
 
-- **Embeddings**: Ollama `nomic-embed-text` on Ghost (192.168.1.91:11434)
-- **Generation**: Ollama `qwen2.5-coder:32b` on Ghost
+- **Embeddings**: Ollama `nomic-embed-text` (local or remote)
+- **Generation**: Ollama `qwen2.5-coder:32b` (local or remote)
 - **Vector storage**: Neo4j 5 native vector indexes
 - **Zero new Python dependencies** — all LLM/embedding calls via httpx
 

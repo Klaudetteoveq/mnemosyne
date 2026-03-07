@@ -21,6 +21,15 @@ OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 EMBED_TIMEOUT = 30.0
 
 
+def check_ollama_available() -> bool:
+    """Synchronous check whether the Ollama server is reachable."""
+    try:
+        r = httpx.get(OLLAMA_URL, timeout=3.0)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
 async def get_embedding(text: str) -> list[float] | None:
     """Get embedding vector for a single text string.
 

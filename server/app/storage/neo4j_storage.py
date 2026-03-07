@@ -29,7 +29,7 @@ from .base import MemoryStorage, RequestContext, BootstrapMode, ContentPrefer
 logger = logging.getLogger(__name__)
 
 # RAG configuration
-EMBED_ON_WRITE = os.environ.get("MNEMOSYNE_EMBED_ON_WRITE", "1").strip() in ("1", "true", "yes")
+EMBED_ON_WRITE = os.environ.get("MNEMOSYNE_EMBED_ON_WRITE", "0").strip() in ("1", "true", "yes")
 RRF_K = 60  # Reciprocal Rank Fusion constant
 
 VALID_KINDS = {"answer", "decision", "pattern", "command", "note"}
@@ -1178,14 +1178,16 @@ class Neo4jStorage(MemoryStorage):
 
         async with self._driver.session(database=self.database) as session:
             try:
-                result = await session.run(
-                    """
+                # Neo4j doesn't allow parameters in variable-length path patterns,
+                # so we cap hops to a safe literal range.
+                hop_clause = "1..2" if max_hops >= 2 else "1..1"
+                query = f"""
                     UNWIND $ids AS seedId
                     MATCH (seed:MemoryItem) WHERE elementId(seed) = seedId
-                    CALL {
+                    CALL {{
                         WITH seed
                         // Traverse RELATES_TO
-                        OPTIONAL MATCH (seed)-[:RELATES_TO*1..$max_hops]-(related:MemoryItem)
+                        OPTIONAL MATCH (seed)-[:RELATES_TO*{hop_clause}]-(related:MemoryItem)
                         WHERE related <> seed
                         RETURN related AS neighbor
                         UNION
@@ -1200,7 +1202,7 @@ class Neo4jStorage(MemoryStorage):
                         OPTIONAL MATCH (seed)-[:DECIDED_IN]->(s:Session)<-[:DECIDED_IN]-(related:MemoryItem)
                         WHERE related <> seed
                         RETURN related AS neighbor
-                    }
+                    }}
                     WITH DISTINCT neighbor
                     WHERE neighbor IS NOT NULL
                       AND NOT elementId(neighbor) IN $ids
@@ -1218,9 +1220,10 @@ class Neo4jStorage(MemoryStorage):
                         neighbor.importance AS importance,
                         neighbor.workspace_hint AS workspace_hint
                     LIMIT $lim
-                    """,
+                """
+                result = await session.run(
+                    query,
                     ids=item_ids,
-                    max_hops=max_hops,
                     lim=limit,
                 )
                 return [record.data() async for record in result]

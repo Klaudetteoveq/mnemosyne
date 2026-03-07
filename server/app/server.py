@@ -327,7 +327,10 @@ def handle_tool_call(tool_name: str, arguments: dict, context: dict | None = Non
         )
     elif tool_name == "mnemosyne_ingest":
         from chunking import chunk_text
-        from embedding import get_embedding
+        from embedding import get_embedding, check_ollama_available
+
+        if not check_ollama_available():
+            return {"ok": False, "error": "Ollama is not reachable. Document ingestion requires Ollama for embeddings. Set OLLAMA_URL or start Ollama."}
 
         title = arguments["title"]
         content = arguments["content"]
@@ -353,8 +356,11 @@ def handle_tool_call(tool_name: str, arguments: dict, context: dict | None = Non
             )
         )
     elif tool_name == "mnemosyne_ask":
-        from embedding import get_embedding
+        from embedding import get_embedding, check_ollama_available
         from llm import generate_answer, rerank_items
+
+        if not check_ollama_available():
+            return {"answer": "Ollama is not reachable. The mnemosyne_ask tool requires Ollama for embeddings and answer generation. Install Ollama and set OLLAMA_URL, or use mnemosyne_search with method='keyword' instead.", "sources": []}
 
         question = arguments["question"]
         max_context = arguments.get("max_context_items", 8)
@@ -430,7 +436,10 @@ def handle_tool_call(tool_name: str, arguments: dict, context: dict | None = Non
             "sources": sources,
         }
     elif tool_name == "mnemosyne_backfill_embeddings":
-        from embedding import get_embedding, embedding_text_for_memory
+        from embedding import get_embedding, embedding_text_for_memory, check_ollama_available
+
+        if not check_ollama_available():
+            return {"ok": False, "embedded": 0, "failed": 0, "total": 0, "error": "Ollama is not reachable. Backfill requires Ollama for embeddings. Set OLLAMA_URL or start Ollama."}
 
         batch_limit = arguments.get("limit", 50)
         items = _run_async(
@@ -550,6 +559,21 @@ if __name__ == "__main__":
 
     storage = _create_storage()
     _run_async(storage.initialize())
+
+    # Check Ollama availability at startup
+    try:
+        from embedding import check_ollama_available, OLLAMA_URL
+        if check_ollama_available():
+            logger.info("Ollama reachable at %s — RAG features enabled", OLLAMA_URL)
+        else:
+            logger.warning(
+                "Ollama NOT reachable at %s — RAG features disabled. "
+                "Core memory tools (bootstrap, write, read, search, commit_session, last_session) work normally. "
+                "To enable RAG: install Ollama, pull models, set OLLAMA_URL and MNEMOSYNE_EMBED_ON_WRITE=1.",
+                OLLAMA_URL,
+            )
+    except Exception:
+        logger.warning("Could not check Ollama availability — RAG features may be unavailable")
 
     logger.info(
         "Mnemosyne MCP server starting on %s:%d (neo4j)",
