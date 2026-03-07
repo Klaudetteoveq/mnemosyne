@@ -3,6 +3,7 @@ Mnemosyne MCP Server
 
 Persistent memory layer for AI coding agents.
 Neo4j knowledge graph backend with MCP protocol over HTTP.
+RAG-capable: vector embeddings, hybrid search, document ingestion, answer generation.
 
 Environment variables:
     MNEMOSYNE_BIND        - Bind address (default: "0.0.0.0")
@@ -11,6 +12,10 @@ Environment variables:
     NEO4J_USER            - Username (default: "neo4j")
     NEO4J_PASSWORD        - Password (default: "mnemosyne")
     NEO4J_DATABASE        - Database name (default: "neo4j")
+    OLLAMA_URL            - Ollama server URL (default: "http://localhost:11434")
+    OLLAMA_EMBED_MODEL    - Embedding model (default: "nomic-embed-text")
+    OLLAMA_CHAT_MODEL     - Chat model (default: "qwen2.5-coder:32b")
+    MNEMOSYNE_EMBED_ON_WRITE - Auto-embed on write (default: "1")
 """
 
 import os
@@ -125,7 +130,7 @@ TOOLS = [
     },
     {
         "name": "mnemosyne_search",
-        "description": "Search memory",
+        "description": "Search memory (keyword, semantic, or hybrid)",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -136,6 +141,11 @@ TOOLS = [
                     "enum": ["compact", "full"],
                 },
                 "snippet_chars": {"type": "integer"},
+                "method": {
+                    "type": "string",
+                    "enum": ["keyword", "semantic", "hybrid"],
+                    "description": "Search method: keyword (fulltext), semantic (vector), hybrid (both with RRF). Default: hybrid",
+                },
             },
             "required": ["query"],
         },
@@ -164,6 +174,53 @@ TOOLS = [
             "properties": {
                 "workspace_hint": {"type": "string"},
                 "limit": {"type": "integer"},
+            },
+        },
+    },
+    {
+        "name": "mnemosyne_ingest",
+        "description": "Ingest a document: chunks it, embeds each chunk, stores in knowledge graph for RAG retrieval",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Document title"},
+                "content": {"type": "string", "description": "Full document text to ingest"},
+                "source": {"type": "string", "description": "Source URL or path"},
+                "mime_type": {"type": "string", "description": "MIME type (default: text/plain)"},
+                "workspace_hint": {"type": "string"},
+                "chunk_size": {"type": "integer", "description": "Chunk size in tokens (default: 512)"},
+                "chunk_overlap": {"type": "integer", "description": "Chunk overlap in tokens (default: 50)"},
+            },
+            "required": ["title", "content"],
+        },
+    },
+    {
+        "name": "mnemosyne_ask",
+        "description": "RAG question answering: retrieves relevant context from memory and generates an answer using LLM",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "The question to answer"},
+                "workspace_hint": {"type": "string"},
+                "max_context_items": {"type": "integer", "description": "Max items to use as context (default: 8)"},
+                "method": {
+                    "type": "string",
+                    "enum": ["keyword", "semantic", "hybrid"],
+                    "description": "Search method (default: hybrid)",
+                },
+                "include_chunks": {"type": "boolean", "description": "Also search document chunks (default: true)"},
+                "rerank": {"type": "boolean", "description": "Use LLM reranking for better precision (default: false)"},
+            },
+            "required": ["question"],
+        },
+    },
+    {
+        "name": "mnemosyne_backfill_embeddings",
+        "description": "Backfill embeddings for memory items that don't have them yet",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Max items to process (default: 50)"},
             },
         },
     },
@@ -214,14 +271,33 @@ def handle_tool_call(tool_name: str, arguments: dict, context: dict | None = Non
             )
         )
     elif tool_name == "mnemosyne_search":
+        method = arguments.get("method", "hybrid")
+        query = arguments["query"]
+        # Get embedding for semantic/hybrid search
+        query_embedding = None
+        if method in ("semantic", "hybrid"):
+            from embedding import get_embedding
+            query_embedding = _run_async(get_embedding(query))
+
+        if method == "keyword" or query_embedding is None:
+            # Fallback to keyword-only search
+            return _run_async(
+                storage.search_memory(
+                    query,
+                    arguments.get("limit", 8),
+                    prefer=arguments.get("prefer", "full"),
+                    snippet_chars=arguments.get("snippet_chars", 400),
+                    context=context,
+                )
+            )
         return _run_async(
-            storage.search_memory(
-                arguments["query"],
-                arguments.get("limit", 8),
+            storage.hybrid_search(
+                query,
+                query_embedding=query_embedding,
+                limit=arguments.get("limit", 8),
                 prefer=arguments.get("prefer", "full"),
-                snippet_chars=arguments.get(
-                    "snippet_chars", 400
-                ),
+                snippet_chars=arguments.get("snippet_chars", 400),
+                method=method,
                 context=context,
             )
         )
@@ -249,6 +325,143 @@ def handle_tool_call(tool_name: str, arguments: dict, context: dict | None = Non
                 context=context,
             )
         )
+    elif tool_name == "mnemosyne_ingest":
+        from chunking import chunk_text
+        from embedding import get_embedding, check_ollama_available
+
+        if not check_ollama_available():
+            return {"ok": False, "error": "Ollama is not reachable. Document ingestion requires Ollama for embeddings. Set OLLAMA_URL or start Ollama."}
+
+        title = arguments["title"]
+        content = arguments["content"]
+        chunk_size = arguments.get("chunk_size", 512)
+        chunk_overlap = arguments.get("chunk_overlap", 50)
+
+        # Chunk the document
+        chunks = chunk_text(content, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+
+        # Embed each chunk
+        for chunk in chunks:
+            embedding = _run_async(get_embedding(chunk["content"]))
+            chunk["embedding"] = embedding
+
+        return _run_async(
+            storage.ingest_document(
+                title=title,
+                chunks=chunks,
+                source=arguments.get("source"),
+                mime_type=arguments.get("mime_type"),
+                workspace_hint=arguments.get("workspace_hint"),
+                context=context,
+            )
+        )
+    elif tool_name == "mnemosyne_ask":
+        from embedding import get_embedding, check_ollama_available
+        from llm import generate_answer, rerank_items
+
+        if not check_ollama_available():
+            return {"answer": "Ollama is not reachable. The mnemosyne_ask tool requires Ollama for embeddings and answer generation. Install Ollama and set OLLAMA_URL, or use mnemosyne_search with method='keyword' instead.", "sources": []}
+
+        question = arguments["question"]
+        max_context = arguments.get("max_context_items", 8)
+        method = arguments.get("method", "hybrid")
+        include_chunks = arguments.get("include_chunks", True)
+        do_rerank = arguments.get("rerank", False)
+
+        # Get query embedding
+        query_embedding = _run_async(get_embedding(question))
+
+        # Retrieve context: memories
+        if query_embedding and method in ("semantic", "hybrid"):
+            context_items = _run_async(
+                storage.hybrid_search(
+                    question,
+                    query_embedding=query_embedding,
+                    limit=max_context,
+                    prefer="full",
+                    method=method,
+                    context=context,
+                )
+            )
+        else:
+            context_items = _run_async(
+                storage.search_memory(
+                    question,
+                    limit=max_context,
+                    prefer="full",
+                    context=context,
+                )
+            )
+
+        # Retrieve context: document chunks
+        chunk_items = []
+        if include_chunks and query_embedding:
+            raw_chunks = _run_async(
+                storage.search_chunks(query_embedding, limit=max_context, context=context)
+            )
+            for chunk in raw_chunks:
+                chunk_items.append({
+                    "title": f"[Chunk] {chunk.get('document_title', 'Document')} (pos {chunk.get('position', '?')})",
+                    "kind": "chunk",
+                    "content": chunk.get("content", ""),
+                })
+
+        # Merge and deduplicate context
+        all_context = context_items + chunk_items
+        all_context = all_context[:max_context * 2]  # over-fetch for reranking
+
+        # Optional LLM reranking
+        if do_rerank and len(all_context) > 1:
+            all_context = _run_async(rerank_items(question, all_context))
+
+        all_context = all_context[:max_context]
+
+        if not all_context:
+            return {
+                "answer": "I don't have enough context to answer this question.",
+                "sources": [],
+            }
+
+        # Generate answer
+        answer = _run_async(generate_answer(question, all_context))
+
+        sources = [
+            {"id": item.get("id", ""), "title": item.get("title", ""), "kind": item.get("kind", "")}
+            for item in all_context
+            if item.get("title")
+        ]
+
+        return {
+            "answer": answer or "Failed to generate an answer.",
+            "sources": sources,
+        }
+    elif tool_name == "mnemosyne_backfill_embeddings":
+        from embedding import get_embedding, embedding_text_for_memory, check_ollama_available
+
+        if not check_ollama_available():
+            return {"ok": False, "embedded": 0, "failed": 0, "total": 0, "error": "Ollama is not reachable. Backfill requires Ollama for embeddings. Set OLLAMA_URL or start Ollama."}
+
+        batch_limit = arguments.get("limit", 50)
+        items = _run_async(
+            storage.get_items_without_embeddings(limit=batch_limit, context=context)
+        )
+        embedded = 0
+        failed = 0
+        for item in items:
+            text = embedding_text_for_memory(
+                item.get("title", ""),
+                item.get("content_compact") or item.get("content"),
+            )
+            embedding = _run_async(get_embedding(text))
+            if embedding:
+                success = _run_async(storage.set_embedding(item["id"], embedding))
+                if success:
+                    embedded += 1
+                else:
+                    failed += 1
+            else:
+                failed += 1
+        return {"ok": True, "embedded": embedded, "failed": failed, "total": len(items)}
     else:
         raise ValueError(f"Unknown tool: {tool_name}")
 
@@ -274,7 +487,7 @@ class MCPHandler(BaseHTTPRequestHandler):
                 result = {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "mnemosyne", "version": "1.0.1"},
+                    "serverInfo": {"name": "mnemosyne", "version": "2.0.0"},
                 }
             elif method in ("notifications/initialized", "initialized"):
                 result = {}
@@ -346,6 +559,21 @@ if __name__ == "__main__":
 
     storage = _create_storage()
     _run_async(storage.initialize())
+
+    # Check Ollama availability at startup
+    try:
+        from embedding import check_ollama_available, OLLAMA_URL
+        if check_ollama_available():
+            logger.info("Ollama reachable at %s — RAG features enabled", OLLAMA_URL)
+        else:
+            logger.warning(
+                "Ollama NOT reachable at %s — RAG features disabled. "
+                "Core memory tools (bootstrap, write, read, search, commit_session, last_session) work normally. "
+                "To enable RAG: install Ollama, pull models, set OLLAMA_URL and MNEMOSYNE_EMBED_ON_WRITE=1.",
+                OLLAMA_URL,
+            )
+    except Exception:
+        logger.warning("Could not check Ollama availability — RAG features may be unavailable")
 
     logger.info(
         "Mnemosyne MCP server starting on %s:%d (neo4j)",

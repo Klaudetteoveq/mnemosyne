@@ -62,6 +62,11 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "limit_pinned": {"type": "integer", "default": 8},
                     "limit_recent": {"type": "integer", "default": 10},
+                    "workspace_hint": {"type": "string"},
+                    "mode": {"type": "string", "enum": ["thin", "hybrid", "full"]},
+                    "max_tokens": {"type": "integer"},
+                    "max_items": {"type": "integer"},
+                    "include_sessions": {"type": "boolean"},
                 },
             },
         ),
@@ -76,18 +81,41 @@ async def list_tools() -> list[Tool]:
                     "content": {"type": "string"},
                     "tags_json": {"type": "string", "default": "[]"},
                     "pinned": {"type": "boolean", "default": False},
+                    "content_compact": {"type": "string"},
+                    "workspace_hint": {"type": "string"},
+                    "importance": {"type": "integer"},
+                    "source": {"type": "string"},
                 },
                 "required": ["kind", "title", "content"],
             },
         ),
         Tool(
+            name="mnemosyne_read",
+            description="Read a single memory item by id (on-demand expansion).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "prefer": {"type": "string", "enum": ["full", "compact"]},
+                },
+                "required": ["id"],
+            },
+        ),
+        Tool(
             name="mnemosyne_search",
-            description="Search memory using full-text search.",
+            description="Search memory using keyword, semantic, or hybrid retrieval.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
                     "limit": {"type": "integer", "default": 8},
+                    "prefer": {"type": "string", "enum": ["compact", "full"]},
+                    "snippet_chars": {"type": "integer"},
+                    "method": {
+                        "type": "string",
+                        "enum": ["keyword", "semantic", "hybrid"],
+                        "description": "Search method (default: hybrid)",
+                    },
                 },
                 "required": ["query"],
             },
@@ -114,6 +142,49 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "workspace_hint": {"type": "string", "default": "global"},
                     "limit": {"type": "integer", "default": 3},
+                },
+            },
+        ),
+        Tool(
+            name="mnemosyne_ingest",
+            description="Ingest a document: chunks, embeds, and stores for RAG retrieval.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "content": {"type": "string"},
+                    "source": {"type": "string"},
+                    "mime_type": {"type": "string"},
+                    "workspace_hint": {"type": "string"},
+                    "chunk_size": {"type": "integer"},
+                    "chunk_overlap": {"type": "integer"},
+                },
+                "required": ["title", "content"],
+            },
+        ),
+        Tool(
+            name="mnemosyne_ask",
+            description="RAG question answering: retrieves context and generates an answer.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "workspace_hint": {"type": "string"},
+                    "max_context_items": {"type": "integer"},
+                    "method": {"type": "string", "enum": ["keyword", "semantic", "hybrid"]},
+                    "include_chunks": {"type": "boolean"},
+                    "rerank": {"type": "boolean"},
+                },
+                "required": ["question"],
+            },
+        ),
+        Tool(
+            name="mnemosyne_backfill_embeddings",
+            description="Backfill embeddings for memory items that don't have them yet.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer"},
                 },
             },
         ),

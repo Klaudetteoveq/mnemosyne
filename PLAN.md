@@ -96,6 +96,6 @@ User-level VS Code MCP config:
 - [x] Phase 1: Standalone repo with abstract storage interface
 - [x] Phase 2: Neo4j knowledge graph backend
 - [x] Phase 3: Remove legacy storage, go public-ready
-- [ ] Phase 4: Enhanced graph queries (relationship traversal, semantic search)
+- [x] Phase 4: RAG — vector embeddings, hybrid search, document ingestion, LLM generation (Ollama-optional)
 - [ ] Phase 5: Multi-agent memory sharing with access control
 - [x] Phase 6: Context pollution mitigation (bootstrap modes, ranking, token budgeting, `mnemosyne_read`)

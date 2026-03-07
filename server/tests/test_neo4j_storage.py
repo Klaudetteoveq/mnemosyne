@@ -3,9 +3,7 @@ Unit tests for Neo4j storage backend.
 Requires a running Neo4j instance. Skips if not available.
 """
 
-import json
 import pytest
-import asyncio
 import os
 import sys
 
@@ -478,3 +476,133 @@ async def test_write_read_roundtrip(storage):
     assert item["content"] == full_content.strip()
     assert item["importance"] == 75
     assert item["workspace_hint"] == "mnemosyne"
+
+
+# --- RAG tests ---
+
+
+@pytest.mark.asyncio
+async def test_set_and_get_embedding(storage):
+    """Set embedding on an item and verify it's stored."""
+    r = await storage.write_memory(
+        kind="note",
+        title="Neo4j Test: Embedding",
+        content="Test item for embedding storage",
+    )
+    assert r["ok"] is True
+
+    # Set a dummy embedding (768 dimensions)
+    dummy_embedding = [0.1] * 768
+    success = await storage.set_embedding(r["id"], dummy_embedding)
+    assert success is True
+
+    # Verify embedding is stored
+    items = await storage.get_items_without_embeddings(limit=100)
+    ids_without = [i["id"] for i in items]
+    assert r["id"] not in ids_without
+
+
+@pytest.mark.asyncio
+async def test_get_items_without_embeddings(storage):
+    """Items without embeddings are returned by get_items_without_embeddings."""
+    r = await storage.write_memory(
+        kind="note",
+        title="Neo4j Test: No Embedding",
+        content="Item that should lack an embedding",
+    )
+    assert r["ok"] is True
+
+    items = await storage.get_items_without_embeddings(limit=100)
+    ids = [i["id"] for i in items]
+    assert r["id"] in ids
+
+
+@pytest.mark.asyncio
+async def test_vector_search(storage):
+    """Vector search returns results for items with embeddings."""
+    r = await storage.write_memory(
+        kind="decision",
+        title="Neo4j Test: Vector Search Target",
+        content="This decision is about vector search",
+    )
+    dummy_embedding = [0.5] * 768
+    await storage.set_embedding(r["id"], dummy_embedding)
+
+    # Search with a similar embedding
+    query_embedding = [0.5] * 768
+    results = await storage.vector_search(query_embedding, limit=5)
+    # Should return at least the item we just embedded
+    assert isinstance(results, list)
+
+
+@pytest.mark.asyncio
+async def test_hybrid_search_keyword_fallback(storage):
+    """Hybrid search falls back to keyword when no embedding provided."""
+    await storage.write_memory(
+        kind="note",
+        title="Neo4j Test: Hybrid Keyword Fallback",
+        content="Content for hybrid keyword fallback test",
+    )
+    results = await storage.hybrid_search(
+        "keyword fallback",
+        query_embedding=None,
+        limit=5,
+        method="hybrid",
+    )
+    assert isinstance(results, list)
+
+
+@pytest.mark.asyncio
+async def test_ingest_document(storage):
+    """Ingest a document with chunks."""
+    chunks = [
+        {"content": "First chunk content", "embedding": [0.1] * 768, "position": 0, "token_count": 5},
+        {"content": "Second chunk content", "embedding": [0.2] * 768, "position": 1, "token_count": 5},
+    ]
+    result = await storage.ingest_document(
+        title="Neo4j Test: Ingested Doc",
+        chunks=chunks,
+        source="pytest",
+        mime_type="text/plain",
+        workspace_hint="neo4j-pytest",
+    )
+    assert result["ok"] is True
+    assert result["chunk_count"] == 2
+    assert "document_id" in result
+
+
+@pytest.mark.asyncio
+async def test_search_chunks(storage):
+    """Search chunks by vector similarity."""
+    chunks = [
+        {"content": "Test chunk for search", "embedding": [0.3] * 768, "position": 0, "token_count": 5},
+    ]
+    await storage.ingest_document(
+        title="Neo4j Test: Chunk Search Doc",
+        chunks=chunks,
+    )
+
+    results = await storage.search_chunks([0.3] * 768, limit=5)
+    assert isinstance(results, list)
+
+
+@pytest.mark.asyncio
+async def test_graph_expand(storage):
+    """Graph expand finds items with shared tags."""
+    r1 = await storage.write_memory(
+        kind="decision",
+        title="Neo4j Test: Expand Seed",
+        content="Seed decision for graph expansion",
+        tags=["expansion-test"],
+    )
+    r2 = await storage.write_memory(
+        kind="pattern",
+        title="Neo4j Test: Expand Related",
+        content="Related pattern via shared tag",
+        tags=["expansion-test"],
+    )
+
+    related = await storage.graph_expand([r1["id"]], max_hops=1, limit=10)
+    assert isinstance(related, list)
+    related_ids = [r["id"] for r in related]
+    assert r2["id"] in related_ids

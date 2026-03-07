@@ -2,7 +2,7 @@
 
 ![Mnemosyne](docs/mnemosyne_linkedin_image.png)
 
-**Persistent memory layer for AI coding agents**, built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) and backed by a [Neo4j](https://neo4j.com) knowledge graph.
+**Persistent memory layer for AI coding agents**, built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) and backed by a [Neo4j](https://neo4j.com) knowledge graph. Now with **full RAG (Retrieval-Augmented Generation)** capabilities.
 
 Mnemosyne (Μνημοσύνη) — Titaness of Memory — remembers what happened, what was decided, and what comes next across sessions, workspaces, and projects.
 
@@ -11,11 +11,21 @@ Mnemosyne (Μνημοσύνη) — Titaness of Memory — remembers what happene
 - **Bootstrap** — Loads pinned and recent memories at session start, with configurable modes (thin/hybrid/full) and token budgeting to keep context lean
 - **Write** — Stores decisions, commands, patterns, answers, and notes (deduplicates by kind + title), with optional compact content for efficient retrieval
 - **Read** — Retrieves a single memory item by ID with full or compact content on demand
-- **Search** — Full-text search across all stored memories via Neo4j fulltext indexes, with snippet mode for lighter results
+- **Search** — Hybrid search (keyword + semantic + graph) across all stored memories, with fallback to keyword-only when embeddings are unavailable
 - **Commit Session** — Saves session summaries with decisions and next steps
 - **Last Session** — Recalls what happened in the previous session for any workspace
 - **Context Pollution Prevention** — Three-lever system (write-time hygiene, store-time structure, read-time shaping) keeps your AI's context window focused on high-signal information
 - **Knowledge Graph** — Memories, tags, sessions, and workspaces are graph nodes with typed relationships
+
+### RAG Features (v2.0)
+
+- **Vector Embeddings** — Automatic embedding on write via Ollama (`nomic-embed-text`); stored in Neo4j native vector indexes
+- **Hybrid Search** — Reciprocal Rank Fusion combining keyword fulltext, vector similarity, and graph traversal
+- **Document Ingestion** — Chunk, embed, and store larger documents for retrieval via `mnemosyne_ingest`
+- **Question Answering** — RAG pipeline via `mnemosyne_ask`: retrieve → assemble context → generate answer with citations
+- **LLM Reranking** — Optional LLM-as-judge reranking for improved precision
+- **Graph-Augmented Retrieval** — Expand search results by traversing related memories, shared tags, and session links
+- **Backfill** — `mnemosyne_backfill_embeddings` to vectorize existing memories
 
 ## Architecture
 
@@ -25,14 +35,20 @@ Mnemosyne (Μνημοσύνη) — Titaness of Memory — remembers what happene
 │  Extension   │     :8010/mcp    │  (Python)    │      :7687       │  (Graph) │
 └──────────────┘                  └──────────────┘                  └──────────┘
        │                                │
-       │ stdio (alternative)            │
-       └──> mnemosyne_proxy.py ─────────┘
+       │ stdio (alternative)            ├──── HTTP ──── ┌──────────┐
+       └──> mnemosyne_proxy.py ─────────┘    :11434     │  Ollama  │
+                                                        │ (embed + │
+                                                        │ generate)│
+                                                        └──────────┘
 ```
 
 | Component | Location | Description |
 |-----------|----------|-------------|
 | MCP Server | `server/` | Python HTTP server implementing MCP JSON-RPC protocol |
-| Neo4j Storage | `server/app/storage/` | Knowledge graph backend with fulltext search |
+| Neo4j Storage | `server/app/storage/` | Knowledge graph backend with fulltext + vector search |
+| Embedding Client | `server/app/embedding.py` | Ollama embedding client for vector representations |
+| LLM Client | `server/app/llm.py` | Ollama generation client for RAG answers |
+| Chunking | `server/app/chunking.py` | Recursive character splitter for document ingestion |
 | VS Code Extension | `extension/` | Auto-bootstrap on startup, auto-commit on close |
 | Stdio Proxy | `server/mnemosyne_proxy.py` | Bridges stdio MCP transport to HTTP server |
 | Deployment | `deploy/` | Docker Compose + deployment scripts |
@@ -76,7 +92,7 @@ Auto-bootstraps memory on startup and auto-commits on close:
 
 ```bash
 cd extension && npm install && npm run package
-code --install-extension mnemosyne-vscode-1.0.1.vsix
+code --install-extension mnemosyne-vscode-2.0.0.vsix
 ```
 
 Then set `mnemosyne.serverUrl` to `http://localhost:8010/mcp` in VS Code Settings.
@@ -100,6 +116,10 @@ cp .env.example server/.env
 | `NEO4J_PASSWORD` | `mnemosyne` | Neo4j password |
 | `NEO4J_USER` | `neo4j` | Neo4j username |
 | `MNEMOSYNE_PORT` | `8010` | MCP server port |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama server URL (for RAG features) |
+| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Embedding model |
+| `OLLAMA_CHAT_MODEL` | `qwen2.5-coder:32b` | Generation model (for `mnemosyne_ask`) |
+| `MNEMOSYNE_EMBED_ON_WRITE` | `0` | Auto-embed on write (`1` to enable, requires Ollama) |
 
 To test that memories are stored, open localhost:7474 (or whatever you set up if you changed it), log in, and run the following in your browser. If you have created one or more memories, it should show up.
 ```
@@ -130,13 +150,16 @@ RETURN m, r, t;
 | `mnemosyne_bootstrap` | Returns pinned + recent memory items for session context. Supports `mode` (thin/hybrid/full), `max_tokens` budget, and `workspace_hint` scoping |
 | `mnemosyne_write` | Stores a memory item (deduplicates by kind + title). Accepts optional `content_compact`, `importance`, `workspace_hint`, and `source` |
 | `mnemosyne_read` | Retrieves a single memory item by ID with full or compact content |
-| `mnemosyne_search` | Full-text search across all memories. Returns compact snippets by default with `has_full` indicator |
+| `mnemosyne_search` | Search memories via keyword, semantic, or hybrid retrieval. Supports `method` (keyword/semantic/hybrid), `prefer` (compact/full), and `snippet_chars` |
 | `mnemosyne_commit_session` | Commits end-of-session summary with decisions and next steps |
 | `mnemosyne_last_session` | Returns the most recent sessions for a workspace |
+| `mnemosyne_ingest` | Chunk, embed, and store documents for RAG retrieval. Requires Ollama |
+| `mnemosyne_ask` | RAG question answering: retrieve context, generate answer with citations. Requires Ollama |
+| `mnemosyne_backfill_embeddings` | Vectorize existing memories for semantic search. Requires Ollama |
 
 ## Context Pollution Prevention
 
-As your memory store grows, naively loading everything into the AI's context window wastes tokens on low-signal content — stale notes, verbose logs, irrelevant decisions. Mnemosyne v1.0.1 addresses this with a three-lever system:
+As your memory store grows, naively loading everything into the AI's context window wastes tokens on low-signal content — stale notes, verbose logs, irrelevant decisions. Mnemosyne v2.0 addresses this with a three-lever system:
 
 **Lever A — Write-time hygiene.** Each memory kind has a clear contract: decisions capture one decision with rationale, patterns describe a reusable approach, commands store a verified snippet. When content is long, the server auto-generates a compact summary (first ~200 characters at a sentence boundary) so bootstrap never needs to load the full text.
 
@@ -185,7 +208,7 @@ mnemosyne/
 │   ├── Dockerfile          # MCP server container image
 │   ├── mnemosyne_proxy.py  # Stdio-to-HTTP MCP proxy
 │   ├── app/
-│   │   ├── server.py       # Main HTTP MCP server (6 tools)
+│   │   ├── server.py       # Main HTTP MCP server (9 tools)
 │   │   ├── requirements.txt
 │   │   └── storage/
 │   │       ├── base.py           # Abstract storage interface
@@ -204,6 +227,7 @@ mnemosyne/
 │   └── backup.ps1          # Neo4j backup script
 └── docs/
     ├── INSTALL.md          # Full installation guide
+    ├── UPGRADING.md        # v1 → v2 migration guide
     ├── shared-storage.md   # Multi-tenant shared spaces design
     └── visual-identity.md  # Brand guidelines and image prompts
 ```
@@ -211,3 +235,7 @@ mnemosyne/
 ## License
 
 MIT
+
+## Upgrading
+
+Upgrading from v1 to v2? See [docs/UPGRADING.md](docs/UPGRADING.md). All v1 features work without changes — RAG is additive and optional.

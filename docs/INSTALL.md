@@ -156,7 +156,7 @@ cd extension
 npm install
 npm run compile
 npx @vscode/vsce package --no-dependencies
-code --install-extension mnemosyne-vscode-1.0.1.vsix
+code --install-extension mnemosyne-vscode-2.0.0.vsix
 ```
 
 > Requires [Node.js](https://nodejs.org/) 18+ and npm.
