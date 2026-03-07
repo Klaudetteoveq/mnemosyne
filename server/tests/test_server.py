@@ -17,6 +17,21 @@ MNEMOSYNE_URL = os.environ.get("MNEMOSYNE_URL", "http://localhost:8010/mcp")
 TIMEOUT = 10.0
 
 
+def _server_reachable() -> bool:
+    """Check if the Mnemosyne server is reachable."""
+    try:
+        httpx.get(MNEMOSYNE_URL.rsplit("/", 1)[0], timeout=2)
+        return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _server_reachable(),
+    reason=f"Mnemosyne server not reachable at {MNEMOSYNE_URL}",
+)
+
+
 def call_tool(client: httpx.Client, tool_name: str, arguments: dict) -> dict:
     """Call an MCP tool via HTTP."""
     payload = {

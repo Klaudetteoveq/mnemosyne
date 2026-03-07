@@ -361,7 +361,6 @@ def handle_tool_call(tool_name: str, arguments: dict, context: dict | None = Non
         method = arguments.get("method", "hybrid")
         include_chunks = arguments.get("include_chunks", True)
         do_rerank = arguments.get("rerank", False)
-        workspace_hint = arguments.get("workspace_hint")
 
         # Get query embedding
         query_embedding = _run_async(get_embedding(question))

@@ -3,9 +3,7 @@ Unit tests for Neo4j storage backend.
 Requires a running Neo4j instance. Skips if not available.
 """
 
-import json
 import pytest
-import asyncio
 import os
 import sys
 
