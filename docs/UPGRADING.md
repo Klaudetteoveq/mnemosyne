@@ -1,110 +1,100 @@
 # Upgrading from Mnemosyne v1 to v2
 
-## What Changed
+## TL;DR
 
-v2 adds **RAG (Retrieval-Augmented Generation)** capabilities on top of v1. All v1 features continue to work **exactly as before** — RAG is purely additive and **optional**.
+v2 adds **RAG** (vector search, document ingestion, LLM-powered Q&A).
+All v1 features keep working — RAG is additive and optional.
 
-### Without Ollama (default)
-
-All 6 original tools work identically to v1:
-
-| Tool | Status |
-|------|--------|
-| `mnemosyne_bootstrap` | Works as before |
-| `mnemosyne_write` | Works as before |
-| `mnemosyne_read` | Works as before |
-| `mnemosyne_search` | Works as before (keyword fulltext) |
-| `mnemosyne_commit_session` | Works as before |
-| `mnemosyne_last_session` | Works as before |
-
-### With Ollama
-
-Three new tools become available, and search gains semantic/hybrid modes:
-
-| Tool | Requires Ollama | Description |
-|------|----------------|-------------|
-| `mnemosyne_search` (method=hybrid) | Yes | Keyword + vector similarity with Reciprocal Rank Fusion |
-| `mnemosyne_search` (method=semantic) | Yes | Vector similarity only |
-| `mnemosyne_ingest` | Yes | Chunk, embed, and store documents for retrieval |
-| `mnemosyne_ask` | Yes | RAG pipeline: retrieve context → generate answer with citations |
-| `mnemosyne_backfill_embeddings` | Yes | Vectorize existing v1 memories for semantic search |
+**Upgrade in 6 steps:**
+1. Pull latest code
+2. Pull the Ollama embedding model
+3. Edit `.env` on the server
+4. Rebuild & restart the Docker containers
+5. Restart the VS Code MCP connection
+6. Backfill embeddings for existing memories
 
 ---
 
-## Upgrade Steps
+## What Changes
 
-### Step 1: Pull the latest code
+### Without Ollama (safe default)
+
+All 6 original tools work identically to v1 — nothing breaks.
+
+### With Ollama
+
+Three new tools and two new search modes appear:
+
+| Tool | Description |
+|------|-------------|
+| `mnemosyne_search` (method=`semantic`) | Vector similarity search |
+| `mnemosyne_search` (method=`hybrid`) | Keyword + vector with Reciprocal Rank Fusion |
+| `mnemosyne_ingest` | Chunk, embed, and store documents for retrieval |
+| `mnemosyne_ask` | Retrieve context → generate answer with LLM |
+| `mnemosyne_backfill_embeddings` | Vectorize existing v1 memories |
+
+---
+
+## Step-by-Step Upgrade
+
+### Step 1 — Pull the latest code
 
 ```bash
 cd mnemosyne
 git pull
 ```
 
-### Step 2: Rebuild and restart
+### Step 2 — Pull the Ollama embedding model
+
+The embedding model **must** be pulled before the server can generate vectors.
+Without it, every embedding call returns 404 and all RAG features silently fail.
 
 ```bash
-cd server
-docker compose down
-docker compose up -d --build
-```
-
-That's it — you're running v2. Neo4j vector indexes are created automatically on startup. Your existing memories and sessions are untouched.
-
-At startup you'll see one of:
-
-```
-Ollama NOT reachable — RAG features disabled. Core memory tools work normally.
-```
-```
-Ollama reachable at http://localhost:11434 — RAG features enabled
-```
-
----
-
-## Enabling RAG (optional)
-
-### Step 3: Install Ollama
-
-Download from [ollama.com](https://ollama.com/) or:
-
-```bash
-# Linux
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Windows — download installer from https://ollama.com/download/windows
-# macOS — download from https://ollama.com/download/mac
-```
-
-### Step 4: Pull the models
-
-```bash
-# Embedding model (required for all RAG features, ~275 MB)
+# Required (~275 MB) — generates 768-dim vectors for search
 ollama pull nomic-embed-text
 
-# Generation model (required for mnemosyne_ask, large — ~18 GB)
-ollama pull qwen2.5-coder:32b
+# Optional — only needed for mnemosyne_ask (LLM answer generation)
+# Pick ONE based on your hardware:
+ollama pull qwen2.5-coder:7b    # ~4.7 GB, fast, good for most uses
+ollama pull qwen2.5-coder:14b   # ~9 GB, better quality
+ollama pull qwen2.5-coder:32b   # ~18 GB, best quality, slow on CPU
 ```
 
-> **Smaller alternative:** If you don't need `mnemosyne_ask`, you only need the embedding model. If you want a smaller generation model, set `OLLAMA_CHAT_MODEL` to any model you have (e.g. `qwen2.5-coder:7b`).
+> **Tip:** `qwen2.5-coder:7b` is recommended unless you have a powerful GPU.
+> The 32b model can time out on slower hardware.
 
-### Step 5: Configure and restart
+Verify the model is available:
 
-Create or edit `server/.env`:
+```bash
+ollama list   # should show nomic-embed-text in the output
+```
+
+### Step 3 — Configure the server `.env`
+
+Edit the `.env` file **on the deployment target** (not your local machine).
+If you use `deploy.ps1`, edit `server/.env` locally — it gets copied during deploy.
 
 ```ini
-# Enable auto-embedding when writing memories
-MNEMOSYNE_EMBED_ON_WRITE=1
+# --- RAG Configuration ---
 
-# Ollama URL (default: http://localhost:11434)
+# Ollama URL — point to wherever Ollama is running
+OLLAMA_URL=http://localhost:11434
 # If Ollama runs on a different machine:
-# OLLAMA_URL=http://192.168.1.100:11434
+# OLLAMA_URL=http://192.168.1.91:11434
 
-# Models (defaults shown — change to match what you pulled)
-# OLLAMA_EMBED_MODEL=nomic-embed-text
-# OLLAMA_CHAT_MODEL=qwen2.5-coder:32b
+# Models
+OLLAMA_EMBED_MODEL=nomic-embed-text
+OLLAMA_CHAT_MODEL=qwen2.5-coder:7b
+
+# Auto-embed every memory on write (recommended)
+MNEMOSYNE_EMBED_ON_WRITE=1
 ```
 
-Restart:
+> **Important:** If a `.env` file already exists on the remote server, it overrides
+> the defaults in `docker-compose.yml`. Make sure to update **that** file,
+> not just your local copy.
+
+### Step 4 — Rebuild and restart the containers
 
 ```bash
 cd server
@@ -112,27 +102,68 @@ docker compose down
 docker compose up -d --build
 ```
 
-You should now see:
+Or, if you use the deploy script:
+
+```powershell
+.\deploy\deploy.ps1 -SshHost your-host -RemoteDir /path/to/mnemosyne
+```
+
+Check the server logs to confirm RAG is enabled:
+
+```bash
+docker logs --tail 5 mnemosyne-mcp
+```
+
+You should see:
 
 ```
-Ollama reachable at http://localhost:11434 — RAG features enabled
+Ollama reachable at http://...:11434 — RAG features enabled
+Mnemosyne MCP server starting on 0.0.0.0:8010 (neo4j)
 ```
 
-### Step 6: Backfill existing memories (optional)
+If you see `Ollama NOT reachable`, check that `OLLAMA_URL` is correct
+and the Ollama server is running.
 
-Your v1 memories don't have embeddings yet. To vectorize them for semantic search, call the backfill tool from your AI agent:
+### Step 5 — Restart the VS Code MCP connection
+
+**This step is easy to miss.** VS Code caches the tool list from the MCP server.
+After upgrading, the new tools (`mnemosyne_ingest`, `mnemosyne_ask`,
+`mnemosyne_backfill_embeddings`) and the `method` parameter on `mnemosyne_search`
+**will not appear until VS Code reconnects**.
+
+How to restart:
+
+1. Open the Command Palette (`Ctrl+Shift+P`)
+2. Run **"MCP: List Servers"**
+3. Find the `mnemosyne` server and click the **restart** icon ↻
+
+Verify by checking that the agent now sees all 9 tools (was 6 in v1).
+
+### Step 6 — Backfill embeddings for existing memories
+
+Your v1 memories have no vector embeddings. Backfill them so they appear
+in semantic and hybrid searches.
+
+Ask your AI agent:
 
 ```
-Use mnemosyne_backfill_embeddings with limit 100
+Use mnemosyne_backfill_embeddings with limit 50
 ```
+
+Repeat until it returns `"total": 0` (no items left).
 
 Or via curl:
 
 ```bash
-curl -X POST http://localhost:8010/mcp \
+curl -s -X POST http://localhost:8010/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mnemosyne_backfill_embeddings","arguments":{"limit":100}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mnemosyne_backfill_embeddings","arguments":{"limit":50}}}'
 ```
+
+Expected output: `{"ok": true, "embedded": 50, "failed": 0, "total": 50}`
+
+> Run this in batches of 50. Each item makes one Ollama call,
+> so large batches take proportionally longer.
 
 ---
 
@@ -141,15 +172,27 @@ curl -X POST http://localhost:8010/mcp \
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
-| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Embedding model name |
-| `OLLAMA_CHAT_MODEL` | `qwen2.5-coder:32b` | Generation model name |
-| `MNEMOSYNE_EMBED_ON_WRITE` | `0` | Auto-embed memories on write (`1` to enable) |
+| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Embedding model (768-dim) |
+| `OLLAMA_CHAT_MODEL` | `qwen2.5-coder:7b` | LLM for `mnemosyne_ask` |
+| `MNEMOSYNE_EMBED_ON_WRITE` | `0` | Auto-embed on write (`1` = on) |
+
+---
+
+## Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Backfill says `"failed": 5, "embedded": 0` | Embedding model not pulled | Run `ollama pull nomic-embed-text` |
+| `mnemosyne_ask` returns "Failed to generate" | LLM timeout (model too large) | Switch to `qwen2.5-coder:7b` in `.env` and restart |
+| New tools not visible in VS Code | MCP client cached old tool list | Restart the MCP server in VS Code (see Step 5) |
+| Server log: `404 Not Found` for `/api/embeddings` | Model not pulled on Ollama | Run `ollama pull nomic-embed-text` and verify with `ollama list` |
+| Remote `.env` overrides your changes | Old `.env` on server has stale values | SSH to server, edit the `.env` there, then restart container |
 
 ---
 
 ## Rollback
 
-If anything goes wrong, v2 is fully backward-compatible. To disable RAG:
+v2 is fully backward-compatible. To disable RAG:
 
 ```ini
 # server/.env
