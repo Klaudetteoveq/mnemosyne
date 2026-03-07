@@ -50,3 +50,5 @@ backups/
 .coverage
 htmlcov/
 MNEMOSYNE_CONTEXT_POLLUTION_PLAN.md
+extension/package-lock.json
+.vscode/settings.json

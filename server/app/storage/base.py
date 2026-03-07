@@ -6,6 +6,9 @@ All storage backends must implement this interface.
 from abc import ABC, abstractmethod
 from typing import Any, Literal
 
+# Search method for retrieval
+SearchMethod = Literal["keyword", "semantic", "hybrid"]
+
 # Request context carrying identity & scoping info (optional)
 # Expected keys:
 # - user_id: str | None
@@ -142,4 +145,106 @@ class MemoryStorage(ABC):
         context: RequestContext | None = None,
     ) -> list[dict[str, Any]]:
         """Return the most recent session logs for a workspace."""
+        ...
+
+    # --- RAG: Vector search ---
+
+    @abstractmethod
+    async def vector_search(
+        self,
+        query_embedding: list[float],
+        limit: int = 8,
+        context: RequestContext | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search memories by vector similarity.
+
+        Returns ranked results with similarity scores.
+        """
+        ...
+
+    @abstractmethod
+    async def hybrid_search(
+        self,
+        query: str,
+        query_embedding: list[float] | None = None,
+        limit: int = 8,
+        prefer: ContentPrefer = "full",
+        snippet_chars: int = 400,
+        method: "SearchMethod" = "hybrid",
+        context: RequestContext | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search memories using keyword, semantic, or hybrid retrieval.
+
+        method:
+          keyword  — fulltext search only
+          semantic — vector similarity only
+          hybrid   — reciprocal rank fusion of keyword + vector
+        """
+        ...
+
+    @abstractmethod
+    async def graph_expand(
+        self,
+        item_ids: list[str],
+        max_hops: int = 1,
+        limit: int = 10,
+        context: RequestContext | None = None,
+    ) -> list[dict[str, Any]]:
+        """Expand retrieval context via graph traversal.
+
+        Given seed item IDs, traverse RELATES_TO, TAGGED_WITH, and DECIDED_IN
+        relationships to find related items up to max_hops away.
+        """
+        ...
+
+    # --- RAG: Document ingestion ---
+
+    @abstractmethod
+    async def ingest_document(
+        self,
+        title: str,
+        chunks: list[dict],
+        source: str | None = None,
+        mime_type: str | None = None,
+        workspace_hint: str | None = None,
+        context: RequestContext | None = None,
+    ) -> dict[str, Any]:
+        """Ingest a document as chunks with embeddings.
+
+        chunks: list of {content, embedding, position, token_count}
+        Returns {ok, document_id, chunk_count}
+        """
+        ...
+
+    @abstractmethod
+    async def search_chunks(
+        self,
+        query_embedding: list[float],
+        limit: int = 8,
+        context: RequestContext | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search document chunks by vector similarity.
+
+        Returns chunks with their parent document info.
+        """
+        ...
+
+    # --- RAG: Backfill ---
+
+    @abstractmethod
+    async def get_items_without_embeddings(
+        self,
+        limit: int = 100,
+        context: RequestContext | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get memory items that don't have embeddings yet (for backfill)."""
+        ...
+
+    @abstractmethod
+    async def set_embedding(
+        self,
+        item_id: str,
+        embedding: list[float],
+    ) -> bool:
+        """Set the embedding vector for a memory item. Returns True on success."""
         ...

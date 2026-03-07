@@ -340,3 +340,158 @@ class TestSearchModes:
         ]
         if found:
             assert found[0]["has_full"] is True
+
+
+# --- RAG feature tests (HTTP) ---
+
+
+class TestSearchMethods:
+    """Test the new search method parameter (keyword/semantic/hybrid)."""
+
+    def test_search_keyword_method(self, http_client):
+        """Search with method=keyword uses fulltext only."""
+        call_tool(
+            http_client,
+            "mnemosyne_write",
+            {
+                "kind": "note",
+                "title": "RAG Keyword Search Test",
+                "content": "Testing keyword-only retrieval mode",
+            },
+        )
+        response = call_tool(
+            http_client,
+            "mnemosyne_search",
+            {
+                "query": "keyword retrieval",
+                "method": "keyword",
+                "limit": 5,
+            },
+        )
+        result = parse_tool_result(response)
+        assert isinstance(result, list)
+
+    def test_search_hybrid_method(self, http_client):
+        """Search with method=hybrid (default) returns results."""
+        response = call_tool(
+            http_client,
+            "mnemosyne_search",
+            {
+                "query": "keyword retrieval",
+                "method": "hybrid",
+                "limit": 5,
+            },
+        )
+        result = parse_tool_result(response)
+        assert isinstance(result, list)
+
+    def test_search_semantic_method(self, http_client):
+        """Search with method=semantic uses vector similarity."""
+        response = call_tool(
+            http_client,
+            "mnemosyne_search",
+            {
+                "query": "knowledge graph storage",
+                "method": "semantic",
+                "limit": 5,
+            },
+        )
+        result = parse_tool_result(response)
+        assert isinstance(result, list)
+
+
+class TestIngest:
+    """Test document ingestion pipeline."""
+
+    def test_ingest_document(self, http_client):
+        """Ingest a document and verify chunk count."""
+        content = "This is a test document for ingestion. " * 50
+        response = call_tool(
+            http_client,
+            "mnemosyne_ingest",
+            {
+                "title": "RAG Ingestion Test Doc",
+                "content": content,
+                "source": "pytest",
+                "workspace_hint": "mnemosyne-pytest",
+            },
+        )
+        result = parse_tool_result(response)
+        assert result["ok"] is True
+        assert result["chunk_count"] > 0
+        assert "document_id" in result
+
+    def test_ingest_small_document(self, http_client):
+        """Ingesting a small document produces at least 1 chunk."""
+        response = call_tool(
+            http_client,
+            "mnemosyne_ingest",
+            {
+                "title": "RAG Small Doc Test",
+                "content": "A short document.",
+            },
+        )
+        result = parse_tool_result(response)
+        assert result["ok"] is True
+        assert result["chunk_count"] >= 1
+
+
+class TestAsk:
+    """Test RAG question answering."""
+
+    def test_ask_returns_answer(self, http_client):
+        """Ask a question and get an answer with sources."""
+        # Seed some context first
+        call_tool(
+            http_client,
+            "mnemosyne_write",
+            {
+                "kind": "decision",
+                "title": "RAG Ask Test Decision",
+                "content": "We decided to use Neo4j for graph storage because it supports native vector indexes.",
+            },
+        )
+        response = call_tool(
+            http_client,
+            "mnemosyne_ask",
+            {
+                "question": "Why did we choose Neo4j?",
+                "max_context_items": 5,
+                "method": "keyword",
+            },
+        )
+        result = parse_tool_result(response)
+        assert "answer" in result
+        assert "sources" in result
+        assert isinstance(result["sources"], list)
+
+    def test_ask_empty_context(self, http_client):
+        """Ask about something with no context returns graceful message."""
+        response = call_tool(
+            http_client,
+            "mnemosyne_ask",
+            {
+                "question": "What is the airspeed velocity of an unladen swallow?",
+                "method": "keyword",
+                "include_chunks": False,
+            },
+        )
+        result = parse_tool_result(response)
+        assert "answer" in result
+
+
+class TestBackfillEmbeddings:
+    """Test embedding backfill tool."""
+
+    def test_backfill_embeddings(self, http_client):
+        """Backfill should process items and return counts."""
+        response = call_tool(
+            http_client,
+            "mnemosyne_backfill_embeddings",
+            {"limit": 5},
+        )
+        result = parse_tool_result(response)
+        assert result["ok"] is True
+        assert "embedded" in result
+        assert "failed" in result
+        assert "total" in result

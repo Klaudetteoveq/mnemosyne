@@ -28,6 +28,10 @@ from .base import MemoryStorage, RequestContext, BootstrapMode, ContentPrefer
 
 logger = logging.getLogger(__name__)
 
+# RAG configuration
+EMBED_ON_WRITE = os.environ.get("MNEMOSYNE_EMBED_ON_WRITE", "1").strip() in ("1", "true", "yes")
+RRF_K = 60  # Reciprocal Rank Fusion constant
+
 VALID_KINDS = {"answer", "decision", "pattern", "command", "note"}
 
 # --- Context pollution mitigation: ranking constants ---
@@ -248,6 +252,47 @@ class Neo4jStorage(MemoryStorage):
                 "FOR (m:MemoryItem) ON (m.space_id, m.kind, m.title)"
             )
 
+            # --- RAG: Vector indexes ---
+            try:
+                await session.run(
+                    """
+                    CREATE VECTOR INDEX memory_embedding IF NOT EXISTS
+                    FOR (m:MemoryItem)
+                    ON (m.embedding)
+                    OPTIONS {indexConfig: {
+                        `vector.dimensions`: 768,
+                        `vector.similarity_function`: 'cosine'
+                    }}
+                    """
+                )
+            except Exception as e:
+                logger.warning("Memory vector index creation: %s", e)
+
+            try:
+                await session.run(
+                    """
+                    CREATE VECTOR INDEX chunk_embedding IF NOT EXISTS
+                    FOR (c:Chunk)
+                    ON (c.embedding)
+                    OPTIONS {indexConfig: {
+                        `vector.dimensions`: 768,
+                        `vector.similarity_function`: 'cosine'
+                    }}
+                    """
+                )
+            except Exception as e:
+                logger.warning("Chunk vector index creation: %s", e)
+
+            # Document indexes
+            await session.run(
+                "CREATE INDEX document_workspace IF NOT EXISTS "
+                "FOR (d:Document) ON (d.workspace_hint)"
+            )
+            await session.run(
+                "CREATE INDEX document_ingested IF NOT EXISTS "
+                "FOR (d:Document) ON (d.ingested_at)"
+            )
+
         logger.info("Neo4j storage initialized at %s", self.uri)
 
     async def close(self) -> None:
@@ -416,7 +461,23 @@ class Neo4jStorage(MemoryStorage):
                             tag=tag_name,
                         )
 
+            # Embed the item asynchronously (best-effort)
+            await self._embed_item(str(item_id), title, content_compact)
+
             return {"ok": True, "action": action, "id": str(item_id)}
+
+    async def _embed_item(self, item_id: str, title: str, content_compact: str | None) -> None:
+        """Compute and store embedding for a memory item (best-effort)."""
+        if not EMBED_ON_WRITE:
+            return
+        try:
+            from embedding import get_embedding, embedding_text_for_memory
+            text = embedding_text_for_memory(title, content_compact)
+            embedding = await get_embedding(text)
+            if embedding:
+                await self.set_embedding(item_id, embedding)
+        except Exception as e:
+            logger.warning("Failed to embed item %s: %s", item_id, e)
 
     async def search_memory(
         self,
@@ -965,3 +1026,388 @@ class Neo4jStorage(MemoryStorage):
         if not isinstance(allowed, list) or not allowed:
             allowed = [space_id]
         return space_id, allowed
+
+    # ----------------------------------------------------------------
+    # RAG: Vector search
+    # ----------------------------------------------------------------
+
+    async def vector_search(
+        self,
+        query_embedding: list[float],
+        limit: int = 8,
+        context: RequestContext | None = None,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(limit, 50))
+        async with self._driver.session(database=self.database) as session:
+            try:
+                result = await session.run(
+                    """
+                    CALL db.index.vector.queryNodes('memory_embedding', $k, $embedding)
+                    YIELD node, score
+                    OPTIONAL MATCH (node)-[:TAGGED_WITH]->(t:Tag)
+                    WITH node, score, collect(t.name) AS tags
+                    RETURN
+                        elementId(node) AS id,
+                        node.kind AS kind,
+                        node.title AS title,
+                        node.content AS content,
+                        node.content_compact AS content_compact,
+                        tags,
+                        node.pinned AS pinned,
+                        node.updated_at AS updated_at,
+                        node.importance AS importance,
+                        node.workspace_hint AS workspace_hint,
+                        score
+                    ORDER BY score DESC
+                    LIMIT $lim
+                    """,
+                    k=limit,
+                    embedding=query_embedding,
+                    lim=limit,
+                )
+                records = [record.data() async for record in result]
+                return records
+            except Exception as e:
+                logger.warning("Vector search failed: %s", e)
+                return []
+
+    async def hybrid_search(
+        self,
+        query: str,
+        query_embedding: list[float] | None = None,
+        limit: int = 8,
+        prefer: ContentPrefer = "full",
+        snippet_chars: int = 400,
+        method: str = "hybrid",
+        context: RequestContext | None = None,
+    ) -> list[dict[str, Any]]:
+        """Hybrid search: keyword + vector with reciprocal rank fusion."""
+        query = (query or "").strip()
+        if not query:
+            return []
+        limit = max(1, min(limit, 25))
+
+        # Keyword search
+        keyword_results = []
+        if method in ("keyword", "hybrid"):
+            keyword_results = await self.search_memory(
+                query, limit=limit * 2, prefer="full",
+                snippet_chars=snippet_chars, context=context,
+            )
+
+        # Vector search
+        vector_results = []
+        if method in ("semantic", "hybrid") and query_embedding:
+            raw = await self.vector_search(
+                query_embedding, limit=limit * 2, context=context,
+            )
+            vector_results = self._format_search_results(raw, "full", snippet_chars)
+
+        # If only one method, return directly
+        if method == "keyword":
+            return keyword_results[:limit]
+        if method == "semantic":
+            return vector_results[:limit]
+
+        # Reciprocal Rank Fusion
+        if not vector_results:
+            # No embeddings available, fall back to keyword
+            return keyword_results[:limit]
+
+        fused = self._reciprocal_rank_fusion(
+            [keyword_results, vector_results], k=RRF_K,
+        )
+        # Format based on preference
+        results = []
+        for item in fused[:limit]:
+            content_full = item.get("content") or ""
+            content_compact = item.get("content_compact") or ""
+            has_full = bool(content_full)
+            if prefer == "compact":
+                content = content_compact or _auto_compact(content_full, max_chars=snippet_chars)
+            else:
+                content = content_full
+            results.append({
+                "id": item["id"],
+                "kind": item.get("kind", "note"),
+                "title": item.get("title", ""),
+                "content": content,
+                "tags": item.get("tags", "[]"),
+                "pinned": 1 if item.get("pinned") else 0,
+                "updated_at": item.get("updated_at", ""),
+                "has_full": has_full,
+                "rrf_score": item.get("_rrf_score", 0),
+            })
+        return results
+
+    def _reciprocal_rank_fusion(
+        self,
+        result_lists: list[list[dict]],
+        k: int = 60,
+    ) -> list[dict]:
+        """Merge multiple ranked lists using Reciprocal Rank Fusion.
+
+        RRF score = sum(1 / (k + rank_i)) for each list where the item appears.
+        """
+        scored: dict[str, dict] = {}
+        for result_list in result_lists:
+            for rank, item in enumerate(result_list):
+                item_id = item.get("id", "")
+                if not item_id:
+                    continue
+                if item_id not in scored:
+                    scored[item_id] = {**item, "_rrf_score": 0.0}
+                scored[item_id]["_rrf_score"] += 1.0 / (k + rank)
+        return sorted(scored.values(), key=lambda x: x["_rrf_score"], reverse=True)
+
+    # ----------------------------------------------------------------
+    # RAG: Graph-augmented retrieval
+    # ----------------------------------------------------------------
+
+    async def graph_expand(
+        self,
+        item_ids: list[str],
+        max_hops: int = 1,
+        limit: int = 10,
+        context: RequestContext | None = None,
+    ) -> list[dict[str, Any]]:
+        if not item_ids:
+            return []
+        max_hops = max(1, min(max_hops, 3))
+        limit = max(1, min(limit, 50))
+
+        async with self._driver.session(database=self.database) as session:
+            try:
+                result = await session.run(
+                    """
+                    UNWIND $ids AS seedId
+                    MATCH (seed:MemoryItem) WHERE elementId(seed) = seedId
+                    CALL {
+                        WITH seed
+                        // Traverse RELATES_TO
+                        OPTIONAL MATCH (seed)-[:RELATES_TO*1..$max_hops]-(related:MemoryItem)
+                        WHERE related <> seed
+                        RETURN related AS neighbor
+                        UNION
+                        WITH seed
+                        // Traverse shared tags
+                        OPTIONAL MATCH (seed)-[:TAGGED_WITH]->(t:Tag)<-[:TAGGED_WITH]-(related:MemoryItem)
+                        WHERE related <> seed
+                        RETURN related AS neighbor
+                        UNION
+                        WITH seed
+                        // Traverse shared sessions
+                        OPTIONAL MATCH (seed)-[:DECIDED_IN]->(s:Session)<-[:DECIDED_IN]-(related:MemoryItem)
+                        WHERE related <> seed
+                        RETURN related AS neighbor
+                    }
+                    WITH DISTINCT neighbor
+                    WHERE neighbor IS NOT NULL
+                      AND NOT elementId(neighbor) IN $ids
+                    OPTIONAL MATCH (neighbor)-[:TAGGED_WITH]->(t:Tag)
+                    WITH neighbor, collect(t.name) AS tags
+                    RETURN
+                        elementId(neighbor) AS id,
+                        neighbor.kind AS kind,
+                        neighbor.title AS title,
+                        neighbor.content AS content,
+                        neighbor.content_compact AS content_compact,
+                        tags,
+                        neighbor.pinned AS pinned,
+                        neighbor.updated_at AS updated_at,
+                        neighbor.importance AS importance,
+                        neighbor.workspace_hint AS workspace_hint
+                    LIMIT $lim
+                    """,
+                    ids=item_ids,
+                    max_hops=max_hops,
+                    lim=limit,
+                )
+                return [record.data() async for record in result]
+            except Exception as e:
+                logger.warning("Graph expansion failed: %s", e)
+                return []
+
+    # ----------------------------------------------------------------
+    # RAG: Document ingestion
+    # ----------------------------------------------------------------
+
+    async def ingest_document(
+        self,
+        title: str,
+        chunks: list[dict],
+        source: str | None = None,
+        mime_type: str | None = None,
+        workspace_hint: str | None = None,
+        context: RequestContext | None = None,
+    ) -> dict[str, Any]:
+        title = (title or "").strip()
+        if not title or not chunks:
+            return {"ok": False, "error": "Title and chunks are required"}
+
+        now = _now()
+        workspace_hint = (workspace_hint or "").strip() or None
+        source = (source or "").strip() or None
+        mime_type = (mime_type or "text/plain").strip()
+
+        async with self._driver.session(database=self.database) as session:
+            # Create Document node
+            doc_result = await session.run(
+                """
+                CREATE (d:Document {
+                    title: $title,
+                    source: $source,
+                    mime_type: $mime_type,
+                    ingested_at: $now,
+                    workspace_hint: $workspace_hint,
+                    chunk_count: $chunk_count
+                })
+                WITH d
+                OPTIONAL MATCH (w:Workspace {name: $workspace})
+                FOREACH (_ IN CASE WHEN w IS NOT NULL THEN [1] ELSE [] END |
+                    CREATE (d)-[:IN_WORKSPACE]->(w)
+                )
+                RETURN elementId(d) AS id
+                """,
+                title=title,
+                source=source,
+                mime_type=mime_type,
+                now=now,
+                workspace_hint=workspace_hint,
+                chunk_count=len(chunks),
+                workspace=workspace_hint or "",
+            )
+            doc_record = await doc_result.single()
+            doc_id = doc_record["id"]
+
+            # Create Chunk nodes with embeddings
+            for chunk in chunks:
+                chunk_content = chunk.get("content", "")
+                chunk_embedding = chunk.get("embedding")
+                chunk_position = chunk.get("position", 0)
+                chunk_tokens = chunk.get("token_count", 0)
+
+                if chunk_embedding:
+                    await session.run(
+                        """
+                        MATCH (d:Document) WHERE elementId(d) = $doc_id
+                        CREATE (c:Chunk {
+                            content: $content,
+                            embedding: $embedding,
+                            position: $position,
+                            token_count: $token_count,
+                            created_at: $now
+                        })
+                        CREATE (d)-[:HAS_CHUNK]->(c)
+                        """,
+                        doc_id=doc_id,
+                        content=chunk_content,
+                        embedding=chunk_embedding,
+                        position=chunk_position,
+                        token_count=chunk_tokens,
+                        now=now,
+                    )
+                else:
+                    await session.run(
+                        """
+                        MATCH (d:Document) WHERE elementId(d) = $doc_id
+                        CREATE (c:Chunk {
+                            content: $content,
+                            position: $position,
+                            token_count: $token_count,
+                            created_at: $now
+                        })
+                        CREATE (d)-[:HAS_CHUNK]->(c)
+                        """,
+                        doc_id=doc_id,
+                        content=chunk_content,
+                        position=chunk_position,
+                        token_count=chunk_tokens,
+                        now=now,
+                    )
+
+            return {"ok": True, "document_id": str(doc_id), "chunk_count": len(chunks)}
+
+    async def search_chunks(
+        self,
+        query_embedding: list[float],
+        limit: int = 8,
+        context: RequestContext | None = None,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(limit, 50))
+        async with self._driver.session(database=self.database) as session:
+            try:
+                result = await session.run(
+                    """
+                    CALL db.index.vector.queryNodes('chunk_embedding', $k, $embedding)
+                    YIELD node, score
+                    MATCH (d:Document)-[:HAS_CHUNK]->(node)
+                    RETURN
+                        elementId(node) AS chunk_id,
+                        node.content AS content,
+                        node.position AS position,
+                        node.token_count AS token_count,
+                        score,
+                        elementId(d) AS document_id,
+                        d.title AS document_title,
+                        d.source AS document_source,
+                        d.workspace_hint AS workspace_hint
+                    ORDER BY score DESC
+                    LIMIT $lim
+                    """,
+                    k=limit,
+                    embedding=query_embedding,
+                    lim=limit,
+                )
+                return [record.data() async for record in result]
+            except Exception as e:
+                logger.warning("Chunk vector search failed: %s", e)
+                return []
+
+    # ----------------------------------------------------------------
+    # RAG: Backfill
+    # ----------------------------------------------------------------
+
+    async def get_items_without_embeddings(
+        self,
+        limit: int = 100,
+        context: RequestContext | None = None,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(limit, 1000))
+        async with self._driver.session(database=self.database) as session:
+            result = await session.run(
+                """
+                MATCH (m:MemoryItem)
+                WHERE m.embedding IS NULL
+                RETURN
+                    elementId(m) AS id,
+                    m.title AS title,
+                    m.content_compact AS content_compact,
+                    m.content AS content
+                ORDER BY m.updated_at DESC
+                LIMIT $lim
+                """,
+                lim=limit,
+            )
+            return [record.data() async for record in result]
+
+    async def set_embedding(
+        self,
+        item_id: str,
+        embedding: list[float],
+    ) -> bool:
+        try:
+            async with self._driver.session(database=self.database) as session:
+                await session.run(
+                    """
+                    MATCH (m:MemoryItem)
+                    WHERE elementId(m) = $item_id
+                    SET m.embedding = $embedding
+                    """,
+                    item_id=item_id,
+                    embedding=embedding,
+                )
+                return True
+        except Exception as e:
+            logger.warning("Failed to set embedding for %s: %s", item_id, e)
+            return False

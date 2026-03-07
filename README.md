@@ -2,7 +2,7 @@
 
 ![Mnemosyne](docs/mnemosyne_linkedin_image.png)
 
-**Persistent memory layer for AI coding agents**, built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) and backed by a [Neo4j](https://neo4j.com) knowledge graph.
+**Persistent memory layer for AI coding agents**, built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) and backed by a [Neo4j](https://neo4j.com) knowledge graph. Now with **full RAG (Retrieval-Augmented Generation)** capabilities.
 
 Mnemosyne (Μνημοσύνη) — Titaness of Memory — remembers what happened, what was decided, and what comes next across sessions, workspaces, and projects.
 
@@ -11,11 +11,21 @@ Mnemosyne (Μνημοσύνη) — Titaness of Memory — remembers what happene
 - **Bootstrap** — Loads pinned and recent memories at session start, with configurable modes (thin/hybrid/full) and token budgeting to keep context lean
 - **Write** — Stores decisions, commands, patterns, answers, and notes (deduplicates by kind + title), with optional compact content for efficient retrieval
 - **Read** — Retrieves a single memory item by ID with full or compact content on demand
-- **Search** — Full-text search across all stored memories via Neo4j fulltext indexes, with snippet mode for lighter results
+- **Search** — Hybrid search (keyword + semantic + graph) across all stored memories, with fallback to keyword-only when embeddings are unavailable
 - **Commit Session** — Saves session summaries with decisions and next steps
 - **Last Session** — Recalls what happened in the previous session for any workspace
 - **Context Pollution Prevention** — Three-lever system (write-time hygiene, store-time structure, read-time shaping) keeps your AI's context window focused on high-signal information
 - **Knowledge Graph** — Memories, tags, sessions, and workspaces are graph nodes with typed relationships
+
+### RAG Features (v2.0)
+
+- **Vector Embeddings** — Automatic embedding on write via Ollama (`nomic-embed-text`); stored in Neo4j native vector indexes
+- **Hybrid Search** — Reciprocal Rank Fusion combining keyword fulltext, vector similarity, and graph traversal
+- **Document Ingestion** — Chunk, embed, and store larger documents for retrieval via `mnemosyne_ingest`
+- **Question Answering** — RAG pipeline via `mnemosyne_ask`: retrieve → assemble context → generate answer with citations
+- **LLM Reranking** — Optional LLM-as-judge reranking for improved precision
+- **Graph-Augmented Retrieval** — Expand search results by traversing related memories, shared tags, and session links
+- **Backfill** — `mnemosyne_backfill_embeddings` to vectorize existing memories
 
 ## Architecture
 
@@ -25,14 +35,20 @@ Mnemosyne (Μνημοσύνη) — Titaness of Memory — remembers what happene
 │  Extension   │     :8010/mcp    │  (Python)    │      :7687       │  (Graph) │
 └──────────────┘                  └──────────────┘                  └──────────┘
        │                                │
-       │ stdio (alternative)            │
-       └──> mnemosyne_proxy.py ─────────┘
+       │ stdio (alternative)            ├──── HTTP ──── ┌──────────┐
+       └──> mnemosyne_proxy.py ─────────┘    :11434     │  Ollama  │
+                                                        │ (embed + │
+                                                        │ generate)│
+                                                        └──────────┘
 ```
 
 | Component | Location | Description |
 |-----------|----------|-------------|
 | MCP Server | `server/` | Python HTTP server implementing MCP JSON-RPC protocol |
-| Neo4j Storage | `server/app/storage/` | Knowledge graph backend with fulltext search |
+| Neo4j Storage | `server/app/storage/` | Knowledge graph backend with fulltext + vector search |
+| Embedding Client | `server/app/embedding.py` | Ollama embedding client for vector representations |
+| LLM Client | `server/app/llm.py` | Ollama generation client for RAG answers |
+| Chunking | `server/app/chunking.py` | Recursive character splitter for document ingestion |
 | VS Code Extension | `extension/` | Auto-bootstrap on startup, auto-commit on close |
 | Stdio Proxy | `server/mnemosyne_proxy.py` | Bridges stdio MCP transport to HTTP server |
 | Deployment | `deploy/` | Docker Compose + deployment scripts |
