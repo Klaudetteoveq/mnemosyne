@@ -623,6 +623,7 @@ class Neo4jStorage(MemoryStorage):
         max_tokens: int = 0,
         max_items: int = 15,
         include_sessions: bool = False,
+        include_index: bool = False,
         context: RequestContext | None = None,
     ) -> dict[str, Any]:
         limit_pinned = max(0, min(limit_pinned, 25))
@@ -758,7 +759,17 @@ class Neo4jStorage(MemoryStorage):
             result = {"pinned": pinned_out, "recent": recent_out}
             if include_sessions:
                 result["last_session"] = last_session_data
-            return result
+
+        # Generate knowledge index outside the main session block
+        if include_index:
+            index_data = await self.generate_knowledge_index(
+                workspace_hint=workspace_hint,
+                max_tokens=200,  # keep index compact within bootstrap
+                context=context,
+            )
+            result["knowledge_index"] = index_data.get("index", "")
+
+        return result
 
     def _format_bootstrap_item(self, raw: dict, content_text: str) -> dict:
         """Format a raw Neo4j record into a bootstrap response item."""
@@ -1414,3 +1425,270 @@ class Neo4jStorage(MemoryStorage):
         except Exception as e:
             logger.warning("Failed to set embedding for %s: %s", item_id, e)
             return False
+
+    # ----------------------------------------------------------------
+    # Knowledge index (compressed structural map)
+    # ----------------------------------------------------------------
+
+    async def generate_knowledge_index(
+        self,
+        workspace_hint: str = "global",
+        max_tokens: int = 800,
+        context: RequestContext | None = None,
+    ) -> dict[str, Any]:
+        workspace_hint = (workspace_hint or "global").strip()
+        max_chars = max_tokens * 4
+
+        async with self._driver.session(database=self.database) as session:
+            spaces: list[str] | None = None
+            if self._multi_tenant:
+                _, allowed = self._derive_space_and_allowed(context)
+                spaces = allowed
+
+            # 1. Counts per kind
+            if self._multi_tenant:
+                kind_result = await session.run(
+                    """
+                    MATCH (m:MemoryItem)
+                    WHERE m.space_id IN $spaces
+                    RETURN m.kind AS kind, count(m) AS cnt
+                    ORDER BY cnt DESC
+                    """,
+                    spaces=spaces,
+                )
+            else:
+                kind_result = await session.run(
+                    "MATCH (m:MemoryItem) RETURN m.kind AS kind, count(m) AS cnt ORDER BY cnt DESC"
+                )
+            kind_counts = {r["kind"]: r["cnt"] async for r in kind_result}
+
+            # 2. Top tags with counts
+            if self._multi_tenant:
+                tag_result = await session.run(
+                    """
+                    MATCH (m:MemoryItem)-[:TAGGED_WITH]->(t:Tag)
+                    WHERE m.space_id IN $spaces
+                    RETURN t.name AS tag, count(m) AS cnt
+                    ORDER BY cnt DESC
+                    LIMIT 30
+                    """,
+                    spaces=spaces,
+                )
+            else:
+                tag_result = await session.run(
+                    """
+                    MATCH (m:MemoryItem)-[:TAGGED_WITH]->(t:Tag)
+                    RETURN t.name AS tag, count(m) AS cnt
+                    ORDER BY cnt DESC
+                    LIMIT 30
+                    """
+                )
+            tag_counts = [(r["tag"], r["cnt"]) async for r in tag_result]
+
+            # 3. Workspaces with item counts
+            if self._multi_tenant:
+                ws_result = await session.run(
+                    """
+                    MATCH (m:MemoryItem)
+                    WHERE m.space_id IN $spaces AND m.workspace_hint IS NOT NULL
+                    RETURN m.workspace_hint AS ws, count(m) AS cnt
+                    ORDER BY cnt DESC
+                    LIMIT 20
+                    """,
+                    spaces=spaces,
+                )
+            else:
+                ws_result = await session.run(
+                    """
+                    MATCH (m:MemoryItem)
+                    WHERE m.workspace_hint IS NOT NULL
+                    RETURN m.workspace_hint AS ws, count(m) AS cnt
+                    ORDER BY cnt DESC
+                    LIMIT 20
+                    """
+                )
+            workspace_counts = [(r["ws"], r["cnt"]) async for r in ws_result]
+
+            # 4. Pinned item titles (always important)
+            if self._multi_tenant:
+                pinned_result = await session.run(
+                    """
+                    MATCH (m:MemoryItem {pinned: true})
+                    WHERE m.space_id IN $spaces
+                    RETURN m.kind AS kind, m.title AS title
+                    ORDER BY m.updated_at DESC
+                    LIMIT 15
+                    """,
+                    spaces=spaces,
+                )
+            else:
+                pinned_result = await session.run(
+                    """
+                    MATCH (m:MemoryItem {pinned: true})
+                    RETURN m.kind AS kind, m.title AS title
+                    ORDER BY m.updated_at DESC
+                    LIMIT 15
+                    """
+                )
+            pinned_titles = [(r["kind"], r["title"]) async for r in pinned_result]
+
+            # 5. Recent high-value items (decisions + patterns)
+            if self._multi_tenant:
+                recent_result = await session.run(
+                    """
+                    MATCH (m:MemoryItem)
+                    WHERE m.space_id IN $spaces AND m.kind IN ['decision', 'pattern']
+                    RETURN m.kind AS kind, m.title AS title, m.workspace_hint AS ws
+                    ORDER BY m.updated_at DESC
+                    LIMIT 15
+                    """,
+                    spaces=spaces,
+                )
+            else:
+                recent_result = await session.run(
+                    """
+                    MATCH (m:MemoryItem)
+                    WHERE m.kind IN ['decision', 'pattern']
+                    RETURN m.kind AS kind, m.title AS title, m.workspace_hint AS ws
+                    ORDER BY m.updated_at DESC
+                    LIMIT 15
+                    """
+                )
+            recent_hv = [(r["kind"], r["title"], r.get("ws") or "") async for r in recent_result]
+
+            # 6. Document count
+            if self._multi_tenant:
+                doc_result = await session.run(
+                    """
+                    MATCH (d:Document)
+                    WHERE d.workspace_hint IS NULL OR d.workspace_hint IN
+                          [x IN $spaces | x]
+                    RETURN count(d) AS cnt
+                    """,
+                    spaces=spaces,
+                )
+            else:
+                doc_result = await session.run(
+                    "MATCH (d:Document) RETURN count(d) AS cnt"
+                )
+            doc_record = await doc_result.single()
+            doc_count = doc_record["cnt"] if doc_record else 0
+
+        # --- Build compressed index markdown ---
+        total_items = sum(kind_counts.values())
+        lines: list[str] = []
+        lines.append("# Mnemosyne Knowledge Index")
+        lines.append(f"Total: {total_items} memories, {doc_count} documents")
+        lines.append("")
+
+        # Kinds overview
+        if kind_counts:
+            lines.append("## By Type")
+            for kind, cnt in kind_counts.items():
+                lines.append(f"- **{kind}**: {cnt}")
+            lines.append("")
+
+        # Pinned items
+        if pinned_titles:
+            lines.append("## Pinned (Always Relevant)")
+            for kind, title in pinned_titles:
+                lines.append(f"- [{kind}] {title}")
+            lines.append("")
+
+        # Recent decisions & patterns
+        if recent_hv:
+            lines.append("## Recent Decisions & Patterns")
+            for kind, title, ws in recent_hv:
+                ws_tag = f" ({ws})" if ws else ""
+                lines.append(f"- [{kind}] {title}{ws_tag}")
+            lines.append("")
+
+        # Tag clusters
+        if tag_counts:
+            lines.append("## Topics (by tag)")
+            for tag, cnt in tag_counts:
+                lines.append(f"- **{tag}** ({cnt})")
+            lines.append("")
+
+        # Workspaces
+        if workspace_counts:
+            lines.append("## Workspaces")
+            for ws, cnt in workspace_counts:
+                lines.append(f"- **{ws}**: {cnt} items")
+            lines.append("")
+
+        index_text = "\n".join(lines)
+
+        # Truncate if over budget
+        if len(index_text) > max_chars:
+            index_text = index_text[:max_chars].rsplit("\n", 1)[0] + "\n…"
+
+        return {
+            "index": index_text,
+            "token_estimate": _estimate_tokens(index_text),
+            "stats": {
+                "total_items": total_items,
+                "total_documents": doc_count,
+                "kinds": kind_counts,
+                "tag_count": len(tag_counts),
+                "workspace_count": len(workspace_counts),
+                "pinned_count": len(pinned_titles),
+            },
+        }
+
+    # ----------------------------------------------------------------
+    # Auto-context (pre-message injection)
+    # ----------------------------------------------------------------
+
+    async def auto_context(
+        self,
+        message: str,
+        limit: int = 5,
+        min_score: float = 0.3,
+        context: RequestContext | None = None,
+    ) -> list[dict[str, Any]]:
+        message = (message or "").strip()
+        if not message or len(message) < 3:
+            return []
+
+        limit = max(1, min(limit, 10))
+
+        # Try vector search first (best quality), fall back to keyword
+        results = []
+        try:
+            from embedding import get_embedding
+            embedding = await get_embedding(message[:500])
+            if embedding:
+                raw = await self.vector_search(embedding, limit=limit * 2, context=context)
+                for item in raw:
+                    score = item.get("score", 0)
+                    if score >= min_score:
+                        results.append({
+                            "text": _auto_compact(
+                                (item.get("title", "") + ": " + (item.get("content_compact") or item.get("content") or "")).strip(),
+                                max_chars=300,
+                            ),
+                            "score": round(score, 3),
+                            "id": item.get("id", ""),
+                            "kind": item.get("kind", "note"),
+                        })
+                return results[:limit]
+        except Exception as e:
+            logger.debug("Auto-context vector search unavailable: %s", e)
+
+        # Fallback: keyword search
+        keyword_results = await self.search_memory(
+            message[:200], limit=limit, prefer="compact",
+            snippet_chars=200, context=context,
+        )
+        for item in keyword_results:
+            results.append({
+                "text": _auto_compact(
+                    (item.get("title", "") + ": " + (item.get("content") or "")).strip(),
+                    max_chars=300,
+                ),
+                "score": 1.0,  # keyword search doesn't provide similarity scores
+                "id": item.get("id", ""),
+                "kind": item.get("kind", "note"),
+            })
+        return results[:limit]

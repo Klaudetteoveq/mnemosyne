@@ -91,6 +91,18 @@ TOOLS = [
                 "max_tokens": {"type": "integer"},
                 "max_items": {"type": "integer"},
                 "include_sessions": {"type": "boolean"},
+                "include_index": {"type": "boolean", "description": "Include compressed knowledge index in response (default: false)"},
+            },
+        },
+    },
+    {
+        "name": "mnemosyne_index",
+        "description": "Generate a compressed knowledge index — a structural map of what the agent knows. Groups memories by kind, tag clusters, workspaces, and pinned items. ~800 tokens.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workspace_hint": {"type": "string", "description": "Workspace scope (default: global)"},
+                "max_tokens": {"type": "integer", "description": "Max token budget for index (default: 800)"},
             },
         },
     },
@@ -243,6 +255,17 @@ def handle_tool_call(tool_name: str, arguments: dict, context: dict | None = Non
                 include_sessions=arguments.get(
                     "include_sessions", False
                 ),
+                include_index=arguments.get(
+                    "include_index", False
+                ),
+                context=context,
+            )
+        )
+    elif tool_name == "mnemosyne_index":
+        return _run_async(
+            storage.generate_knowledge_index(
+                workspace_hint=arguments.get("workspace_hint", "global"),
+                max_tokens=arguments.get("max_tokens", 800),
                 context=context,
             )
         )
@@ -467,9 +490,20 @@ def handle_tool_call(tool_name: str, arguments: dict, context: dict | None = Non
 
 
 class MCPHandler(BaseHTTPRequestHandler):
-    """HTTP handler for MCP JSON-RPC requests."""
+    """HTTP handler for MCP JSON-RPC and auto-context requests."""
+
+    def do_GET(self):
+        if self.path == "/health":
+            self._send_json(200, {"status": "ok", "server": "mnemosyne"})
+        else:
+            self.send_response(404)
+            self.end_headers()
 
     def do_POST(self):
+        if self.path == "/auto-context":
+            self._handle_auto_context()
+            return
+
         if self.path != "/mcp":
             self.send_response(404)
             self.end_headers()
@@ -548,6 +582,53 @@ class MCPHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
+
+    def _handle_auto_context(self):
+        """Handle /auto-context — pre-message memory injection endpoint.
+
+        POST /auto-context {"text": "...", "limit": 5, "min_score": 0.3}
+        Returns {"memories": [{"text": "...", "score": 0.8, "id": "...", "kind": "..."}]}
+        """
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body) if body else {}
+
+            text = data.get("text", "")
+            limit = data.get("limit", 5)
+            min_score = data.get("min_score", 0.3)
+
+            if not text or len(text.strip()) < 3:
+                self._send_json(200, {"memories": []})
+                return
+
+            # Build context from headers
+            user_id = self.headers.get("X-User-Id")
+            space_id = self.headers.get("X-Space-Id")
+            allowed_spaces: list[str] | None = None
+            if space_id:
+                allowed_spaces = [space_id]
+            elif user_id:
+                allowed_spaces = [f"personal:{user_id}"]
+            context = {
+                "user_id": user_id,
+                "space_id": space_id,
+                "allowed_spaces": allowed_spaces,
+            }
+
+            memories = _run_async(
+                storage.auto_context(
+                    text,
+                    limit=limit,
+                    min_score=min_score,
+                    context=context,
+                )
+            )
+            self._send_json(200, {"memories": memories})
+
+        except Exception as e:
+            logger.warning("Auto-context error: %s", e)
+            self._send_json(200, {"memories": []})  # graceful degradation
 
     def log_message(self, format, *args):
         logger.info("%s - %s", self.address_string(), format % args)
