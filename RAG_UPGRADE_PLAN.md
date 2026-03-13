@@ -118,8 +118,10 @@ The "G" in RAG — synthesize answers from retrieved context.
    LLM-as-judge or lightweight heuristic.
 2. **Query decomposition** — Break complex questions into sub-queries.
 3. **Agentic RAG** — Let LLM request additional retrieval in a loop.
-4. **Evaluation** — Automated quality metrics for retrieval + generation.
+4. ~~**Evaluation** — Automated quality metrics for retrieval + generation.~~ ✅ Implemented in `server/eval/evaluate.py` — benchmarks keyword, semantic, hybrid, and auto-context methods with direct recall, cross-reference, and negative test categories.
 5. **Caching** — Cache embeddings and frequent queries.
+6. **Compressed Knowledge Index** ✅ — `mnemosyne_index` tool generates a structural map of the memory store for cross-reference improvement.
+7. **Auto-Context Endpoint** ✅ — `POST /auto-context` for pre-message memory injection in agent frameworks.
 
 ## Configuration (Environment Variables)
 

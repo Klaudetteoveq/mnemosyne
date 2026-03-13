@@ -129,7 +129,7 @@ Create or edit that file:
 
 > **Running on a different machine?** Replace `localhost` with the IP or hostname of the machine running Docker (e.g. `http://192.168.1.100:8010/mcp`).
 
-Restart VS Code. Your AI assistant now has access to the five Mnemosyne memory tools.
+Restart VS Code. Your AI assistant now has access to the Mnemosyne memory tools (10 tools total).
 
 ---
 
@@ -137,11 +137,21 @@ Restart VS Code. Your AI assistant now has access to the five Mnemosyne memory t
 
 At this point Mnemosyne is fully operational. Your AI coding agent can now:
 
-- **Bootstrap** — Load context at the start of each session
+- **Bootstrap** — Load context at the start of each session (with optional inline knowledge index via `include_index`)
 - **Write** — Store decisions, patterns, commands, and notes
-- **Search** — Full-text search across all memories
+- **Read** — Retrieve a single memory item by ID
+- **Search** — Keyword, semantic, or hybrid search across all memories
 - **Commit Session** — Save what happened and what comes next
 - **Last Session** — Recall the previous session for any workspace
+- **Ingest** — Chunk, embed, and store documents for RAG retrieval (requires Ollama)
+- **Ask** — RAG question answering with citations (requires Ollama)
+- **Backfill Embeddings** — Vectorize existing memories (requires Ollama)
+- **Knowledge Index** — Generate a compressed structural map of your memory store
+
+Additional REST endpoints are also available:
+
+- `POST /auto-context` — Pre-message memory injection for agent frameworks
+- `GET /health` — Liveness check
 
 To teach your AI agent how to use memory, add this to your project's `.github/copilot-instructions.md` — see the one in this repository for an example.
 

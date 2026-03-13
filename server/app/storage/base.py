@@ -109,6 +109,7 @@ class MemoryStorage(ABC):
         max_tokens: int = 0,
         max_items: int = 15,
         include_sessions: bool = False,
+        include_index: bool = False,
         context: RequestContext | None = None,
     ) -> dict[str, Any]:
         """
@@ -120,8 +121,9 @@ class MemoryStorage(ABC):
           max_tokens       – budget cap (~4 chars/token); 0 = unlimited (default 0)
           max_items        – hard limit on total items returned
           include_sessions – include last session summary (default False)
+          include_index    – include compressed knowledge index (default False)
 
-        Returns {"pinned": [...], "recent": [...], "last_session": {...} | None}
+        Returns {"pinned": [...], "recent": [...], "last_session": {...} | None, "knowledge_index": str | None}
         """
         ...
 
@@ -247,4 +249,44 @@ class MemoryStorage(ABC):
         embedding: list[float],
     ) -> bool:
         """Set the embedding vector for a memory item. Returns True on success."""
+        ...
+
+    # --- Knowledge index ---
+
+    @abstractmethod
+    async def generate_knowledge_index(
+        self,
+        workspace_hint: str = "global",
+        max_tokens: int = 800,
+        context: RequestContext | None = None,
+    ) -> dict[str, Any]:
+        """Generate a compressed knowledge index — a structural map of what the agent knows.
+
+        Inspired by zer0dex's dual-layer architecture: a ~800-token semantic
+        table of contents that provides navigational scaffolding and cross-domain
+        pointers. Helps the agent bridge domains that vector similarity alone can't.
+
+        Groups memories by kind and tag clusters, including counts and top items.
+        Returns {"index": str, "token_estimate": int, "stats": {...}}
+        """
+        ...
+
+    # --- Auto-context ---
+
+    @abstractmethod
+    async def auto_context(
+        self,
+        message: str,
+        limit: int = 5,
+        min_score: float = 0.3,
+        context: RequestContext | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve relevant memories for automatic pre-message injection.
+
+        Queries the memory store and returns the top-N relevant items above
+        min_score threshold. Designed to be called on every inbound message
+        with tight latency requirements (~100ms target).
+
+        Returns list of {"text": str, "score": float, "id": str, "kind": str}
+        """
         ...

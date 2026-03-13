@@ -21,7 +21,8 @@ what was decided, and what comes next — across sessions, workspaces, and proje
 ### Components
 
 1. **MCP Server** (`server/app/server.py`) — Python HTTP server implementing MCP JSON-RPC
-   - 6 tools: bootstrap, write, read, search, commit_session, last_session
+   - 10 tools: bootstrap, write, read, search, commit_session, last_session, ingest, ask, backfill_embeddings, index
+   - REST endpoints: `/mcp` (MCP JSON-RPC), `/auto-context` (pre-message injection), `/health` (liveness)
    - Context pollution mitigation with bootstrap modes (thin/hybrid/full) and token budgeting
    - Neo4j knowledge graph storage backend
    - Configurable via environment variables (see `.env.example`)
@@ -97,5 +98,6 @@ User-level VS Code MCP config:
 - [x] Phase 2: Neo4j knowledge graph backend
 - [x] Phase 3: Remove legacy storage, go public-ready
 - [x] Phase 4: RAG — vector embeddings, hybrid search, document ingestion, LLM generation (Ollama-optional)
+- [x] Phase 4.5: Retrieval intelligence — compressed knowledge index, auto-context endpoint, evaluation benchmark
 - [ ] Phase 5: Multi-agent memory sharing with access control
 - [x] Phase 6: Context pollution mitigation (bootstrap modes, ranking, token budgeting, `mnemosyne_read`)

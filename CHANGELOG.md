@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - Unreleased
+
+### Added
+
+- **Knowledge Index** — New `mnemosyne_index` tool generates a compressed ~800-token structural map of the memory store (kind counts, top tags, workspaces, pinned items, recent decisions/patterns)
+- **Bootstrap Index** — `mnemosyne_bootstrap` gains `include_index` parameter to inline the knowledge index in bootstrap responses
+- **Auto-Context Endpoint** — `POST /auto-context` returns top-N relevant memories for a message with min_score filtering. Vector search with keyword fallback, graceful degradation on error. Supports multi-tenant headers (`X-User-Id`, `X-Space-Id`)
+- **Health Endpoint** — `GET /health` for liveness checks
+- **Evaluation Benchmark** — `server/eval/evaluate.py` measures retrieval quality across keyword, semantic, hybrid, and auto-context methods. Generates test cases from live data with direct recall, cross-reference, and negative categories
+
 ## [2.0.0] - 2026-03-07
 
 ### Added
@@ -69,6 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PowerShell deployment and backup scripts
 - GitHub Actions CI workflow
 
+[2.1.0]: https://github.com/oveku/mnemosyne/compare/v2.0.0...HEAD
 [2.0.0]: https://github.com/oveku/mnemosyne/compare/v1.0.1...v2.0.0
 [1.0.1]: https://github.com/oveku/mnemosyne/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/oveku/mnemosyne/releases/tag/v1.0.0

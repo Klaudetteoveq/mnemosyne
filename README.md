@@ -27,6 +27,12 @@ Mnemosyne (Μνημοσύνη) — Titaness of Memory — remembers what happene
 - **Graph-Augmented Retrieval** — Expand search results by traversing related memories, shared tags, and session links
 - **Backfill** — `mnemosyne_backfill_embeddings` to vectorize existing memories
 
+### Retrieval Intelligence (v2.1)
+
+- **Knowledge Index** — Compressed ~800-token structural map of your memory store via `mnemosyne_index`. Groups by kind, tags, workspaces, pinned items, and recent decisions. Available standalone or via `include_index=true` in bootstrap
+- **Auto-Context Endpoint** — `POST /auto-context` for pre-message memory injection. Returns top-N relevant memories with min_score filtering. Vector search with keyword fallback, graceful degradation on failure
+- **Evaluation Benchmark** — `server/eval/evaluate.py` measures retrieval quality across keyword, semantic, hybrid, and auto-context methods. Generates test cases from live data with direct recall, cross-reference, and negative categories
+
 ## Architecture
 
 ```
@@ -51,6 +57,7 @@ Mnemosyne (Μνημοσύνη) — Titaness of Memory — remembers what happene
 | Chunking | `server/app/chunking.py` | Recursive character splitter for document ingestion |
 | VS Code Extension | `extension/` | Auto-bootstrap on startup, auto-commit on close |
 | Stdio Proxy | `server/mnemosyne_proxy.py` | Bridges stdio MCP transport to HTTP server |
+| Eval Benchmark | `server/eval/` | Retrieval quality evaluation suite |
 | Deployment | `deploy/` | Docker Compose + deployment scripts |
 
 ## Quick Start
@@ -147,7 +154,7 @@ RETURN m, r, t;
 
 | Tool | Description |
 |------|-------------|
-| `mnemosyne_bootstrap` | Returns pinned + recent memory items for session context. Supports `mode` (thin/hybrid/full), `max_tokens` budget, and `workspace_hint` scoping |
+| `mnemosyne_bootstrap` | Returns pinned + recent memory items for session context. Supports `mode` (thin/hybrid/full), `max_tokens` budget, `workspace_hint` scoping, and `include_index` for inline knowledge index |
 | `mnemosyne_write` | Stores a memory item (deduplicates by kind + title). Accepts optional `content_compact`, `importance`, `workspace_hint`, and `source` |
 | `mnemosyne_read` | Retrieves a single memory item by ID with full or compact content |
 | `mnemosyne_search` | Search memories via keyword, semantic, or hybrid retrieval. Supports `method` (keyword/semantic/hybrid), `prefer` (compact/full), and `snippet_chars` |
@@ -156,6 +163,15 @@ RETURN m, r, t;
 | `mnemosyne_ingest` | Chunk, embed, and store documents for RAG retrieval. Requires Ollama |
 | `mnemosyne_ask` | RAG question answering: retrieve context, generate answer with citations. Requires Ollama |
 | `mnemosyne_backfill_embeddings` | Vectorize existing memories for semantic search. Requires Ollama |
+| `mnemosyne_index` | Generate a compressed knowledge index (~800 tokens) — a structural map of your memory store grouped by kind, tags, workspaces, pinned items, and recent decisions |
+
+### REST Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/mcp` | POST | MCP JSON-RPC protocol (all tools above) |
+| `/auto-context` | POST | Pre-message memory injection. Send `{"text": "...", "limit": 5, "min_score": 0.3}` to get relevant memories for any message before it reaches the LLM. Supports `X-User-Id` / `X-Space-Id` headers for multi-tenant scoping |
+| `/health` | GET | Health check endpoint |
 
 ## Context Pollution Prevention
 
@@ -185,6 +201,25 @@ NEO4J_URI=bolt://localhost:7687 pytest tests/test_neo4j_storage.py -v
 MNEMOSYNE_URL=http://localhost:8010/mcp pytest tests/test_server.py -v
 ```
 
+### Retrieval Evaluation
+
+Benchmark retrieval quality across search methods (requires a populated memory store):
+
+```bash
+cd server
+
+# Full evaluation (requires Mnemosyne + Neo4j + Ollama)
+python eval/evaluate.py
+
+# Quick smoke test (fewer cases, faster)
+python eval/evaluate.py --quick
+
+# Keyword-only (no Ollama required)
+python eval/evaluate.py --method keyword
+```
+
+See [server/eval/README.md](server/eval/README.md) for methodology and scoring details.
+
 ## Deployment
 
 Deploy to a remote server via SSH:
@@ -208,11 +243,14 @@ mnemosyne/
 │   ├── Dockerfile          # MCP server container image
 │   ├── mnemosyne_proxy.py  # Stdio-to-HTTP MCP proxy
 │   ├── app/
-│   │   ├── server.py       # Main HTTP MCP server (9 tools)
+│   │   ├── server.py       # Main HTTP MCP server (10 tools)
 │   │   ├── requirements.txt
 │   │   └── storage/
 │   │       ├── base.py           # Abstract storage interface
 │   │       └── neo4j_storage.py  # Neo4j knowledge graph backend
+│   ├── eval/
+│   │   ├── evaluate.py     # Retrieval quality benchmark suite
+│   │   └── README.md       # Eval methodology documentation
 │   └── tests/
 │       ├── conftest.py
 │       ├── test_neo4j_storage.py
