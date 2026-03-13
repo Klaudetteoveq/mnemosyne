@@ -103,7 +103,6 @@ def generate_test_cases(memories: list[dict], max_cases: int = 100) -> list[dict
 
     for mem in memories:
         title = mem.get("title", "")
-        content = mem.get("content", "")
         kind = mem.get("kind", "note")
         if not title or len(title) < 5:
             continue
@@ -358,7 +357,7 @@ def main():
         print("Start the server first, or use --url to specify the endpoint.")
         sys.exit(1)
 
-    print(f"Mnemosyne Retrieval Evaluation")
+    print("Mnemosyne Retrieval Evaluation")
     print(f"Server: {MNEMOSYNE_URL}")
 
     # Determine methods to test
