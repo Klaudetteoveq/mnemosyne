@@ -1,3 +1,52 @@
+# Upgrading Mnemosyne
+
+## Upgrading from v2.0 to v2.1
+
+### TL;DR
+
+v2.1 adds a **compressed knowledge index** (`mnemosyne_index`), an **auto-context endpoint** (`POST /auto-context`), a **health endpoint** (`GET /health`), and a **retrieval evaluation benchmark**. All v2.0 features keep working — these are additive.
+
+### What's New
+
+| Feature | Description |
+|---------|-------------|
+| `mnemosyne_index` tool | Generates a compressed ~800-token structural map of your memory store |
+| `include_index` in bootstrap | Pass `include_index: true` to get the knowledge index inline with bootstrap |
+| `POST /auto-context` | Pre-message memory injection endpoint for agent frameworks |
+| `GET /health` | Liveness check endpoint |
+| `server/eval/evaluate.py` | Benchmark suite comparing retrieval methods |
+
+### Upgrade Steps
+
+1. **Pull latest code** and rebuild:
+   ```bash
+   cd mnemosyne && git pull
+   cd server && docker compose down && docker compose up -d --build
+   ```
+
+2. **Restart VS Code MCP connection** — the new `mnemosyne_index` tool won't appear until VS Code reconnects. Open Command Palette → "MCP: List Servers" → restart ↻. You should now see 10 tools (was 9 in v2.0).
+
+3. **Try the knowledge index**:
+   ```
+   Use mnemosyne_index with workspace_hint "my-project"
+   ```
+
+4. **Try auto-context** (for agent framework integration):
+   ```bash
+   curl -X POST http://localhost:8010/auto-context \
+     -H "Content-Type: application/json" \
+     -d '{"text": "How do I deploy?", "limit": 5, "min_score": 0.3}'
+   ```
+
+5. **Run the eval benchmark** (optional, requires populated memory store):
+   ```bash
+   cd server && python eval/evaluate.py --quick
+   ```
+
+No configuration changes or data migration needed.
+
+---
+
 # Upgrading from Mnemosyne v1 to v2
 
 ## TL;DR
@@ -137,7 +186,7 @@ How to restart:
 2. Run **"MCP: List Servers"**
 3. Find the `mnemosyne` server and click the **restart** icon ↻
 
-Verify by checking that the agent now sees all 9 tools (was 6 in v1).
+Verify by checking that the agent now sees all 10 tools (was 6 in v1).
 
 ### Step 6 — Backfill embeddings for existing memories
 
