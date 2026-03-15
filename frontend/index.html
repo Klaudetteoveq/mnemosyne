@@ -1,1 +1,48 @@
-<!doctype html><html><head><meta charset="utf-8"><title>Mnemosyne Frontend (WIP)</title></head><body><h1>Mnemosyne — Search</h1><div id="app">Loading...</div></body></html>
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Mnemosyne — Search (WIP)</title>
+    <style>body{font-family:system-ui,Arial;margin:20px}#results{margin-top:1em}</style>
+  </head>
+  <body>
+    <h1>Mnemosyne — Search (WIP)</h1>
+    <form id="searchForm">
+      <input id="q" placeholder="Search query" size="60" />
+      <button type="submit">Search</button>
+    </form>
+    <div id="status"></div>
+    <div id="results"></div>
+    <script>
+    async function doSearch(q){
+      const status = document.getElementById('status');
+      const results = document.getElementById('results');
+      status.textContent = 'Searching…';
+      results.innerHTML = '';
+      try{
+        const res = await fetch('/api/search?q='+encodeURIComponent(q));
+        if(!res.ok) throw new Error(res.status+' '+res.statusText);
+        const data = await res.json();
+        status.textContent = '';
+        if(!Array.isArray(data.hits)){
+          results.textContent = JSON.stringify(data,null,2);
+          return;
+        }
+        const ul = document.createElement('ul');
+        for(const h of data.hits){
+          const li = document.createElement('li');
+          const title = h.title || h.id || JSON.stringify(h);
+          li.innerHTML = '<strong>'+title+'</strong><div style="font-size:90%">'+(h.snippet||'')+'</div>';
+          ul.appendChild(li);
+        }
+        results.appendChild(ul);
+      }catch(e){
+        status.textContent = 'Error: '+e.message;
+      }
+    }
+    document.getElementById('searchForm').addEventListener('submit', e=>{
+      e.preventDefault(); doSearch(document.getElementById('q').value);
+    });
+    </script>
+  </body>
+</html>

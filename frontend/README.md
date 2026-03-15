@@ -1,3 +1,3 @@
 # Mnemosyne frontend
 
-Minimal frontend skeleton that integrates with the server search API.
+This is a minimal static frontend that calls the server search API at /api/search?q=... and renders results.
