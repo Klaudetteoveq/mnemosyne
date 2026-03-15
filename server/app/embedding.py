@@ -7,10 +7,12 @@ Zero additional Python dependencies — uses httpx (already in requirements).
 Configuration:
     OLLAMA_URL          - Ollama server URL (default: http://localhost:11434)
     OLLAMA_EMBED_MODEL  - Embedding model (default: nomic-embed-text)
+    MNEMOSYNE_MOCK_RAG  - when set (1/true), return deterministic mock embeddings if Ollama is unavailable
 """
 
 import logging
 import os
+import hashlib
 
 import httpx
 
@@ -19,10 +21,17 @@ logger = logging.getLogger(__name__)
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 EMBED_TIMEOUT = 30.0
+USE_MOCK = os.environ.get("MNEMOSYNE_MOCK_RAG", "0").strip() in ("1", "true", "yes")
 
 
 def check_ollama_available() -> bool:
-    """Synchronous check whether the Ollama server is reachable."""
+    """Synchronous check whether the Ollama server is reachable.
+
+    If MNEMOSYNE_MOCK_RAG is set, the system treats Ollama as 'available' in the sense
+    that the code will return mocked embeddings / answers for testing purposes.
+    """
+    if USE_MOCK:
+        return True
     try:
         r = httpx.get(OLLAMA_URL, timeout=3.0)
         return r.status_code == 200
@@ -33,10 +42,18 @@ def check_ollama_available() -> bool:
 async def get_embedding(text: str) -> list[float] | None:
     """Get embedding vector for a single text string.
 
-    Returns None if the embedding service is unavailable.
+    Returns None if the embedding service is unavailable and mocks are disabled.
     """
     if not text or not text.strip():
         return None
+
+    # If Ollama is unreachable but mocking is enabled, return deterministic mock vector
+    if not check_ollama_available() and USE_MOCK:
+        # Deterministic pseudo-embedding: hash the input and expand to fixed dimensions
+        h = hashlib.sha256(text.encode("utf-8")).digest()
+        # produce 64-d float vector in range [-1,1]
+        vec = [((b / 255.0) * 2.0 - 1.0) for b in h[:64]]
+        return vec
 
     try:
         async with httpx.AsyncClient(timeout=EMBED_TIMEOUT) as client:
@@ -53,6 +70,11 @@ async def get_embedding(text: str) -> list[float] | None:
             return None
     except Exception as e:
         logger.warning("Embedding request failed: %s", e)
+        # If mocking enabled, return deterministic vector
+        if USE_MOCK:
+            h = hashlib.sha256(text.encode("utf-8")).digest()
+            vec = [((b / 255.0) * 2.0 - 1.0) for b in h[:64]]
+            return vec
         return None
 
 
